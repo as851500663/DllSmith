@@ -3,12 +3,22 @@
 每次发布都会在这里记录：**版本号 / 发布时间 / 更新内容 / 安装包下载地址**。
 客户端启动时会请求目录服务的最新版本，据此强制更新到下面表里的最新版。
 
-> 在线版本页（自动生成，始终与服务器一致）：<http://123.57.94.141:8787/versions>
-> GitHub Releases：<https://github.com/as851500663/DllSmith/releases>
+> 所有安装包与更新说明统一发布在 [Releases](../../releases)。
 
 ---
 
-## v1.0.1 `2026-11-13` · 最新 · 强制更新
+## v1.0.2 `2026-11-13` · 最新 · 强制更新
+
+**新增**
+
+- 客户端顶部新增「访问官网 ↗」按钮，直接打开下载与版本页
+- 版本信息区文案整理，图标与按钮细节统一
+
+**下载**：见 [Releases](../../releases/tag/v1.0.2)
+
+---
+
+## v1.0.1 `2026-11-13` · 强制更新
 
 **修复**
 
@@ -26,8 +36,7 @@
 
 **下载**
 
-- 本站：<http://123.57.94.141:8787/files/DllSmith-Setup-1.0.1.exe>（2.7 MB）
-- GitHub：<https://github.com/as851500663/DllSmith/releases/download/v1.0.1/DllSmith-Setup-1.0.1.exe>
+- [Releases · v1.0.1](../../releases/tag/v1.0.1)
 - SHA256：`c74b663bb58c32cb58874eea283d1911003ba5275af510a240bb9bcd63a5ba45`
 
 ---
@@ -47,7 +56,7 @@
 
 **下载**
 
-- 本站：<http://123.57.94.141:8787/files/DllSmith-Setup-1.0.0.exe>（2.7 MB）
+- [Releases · v1.0.0](../../releases/tag/v1.0.1)（历史版本请见 Releases 列表）
 - SHA256：`d7d7421ca4347cbb…`
 
 ---

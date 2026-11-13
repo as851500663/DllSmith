@@ -1,200 +1,295 @@
+<div align="center">
+
+<img src="docs/screenshots/main.png" alt="DllSmith" width="880">
+
 # DllSmith · DLL 修复匠
 
-**开源（GPL-3.0）的 Windows 运行库 / 系统 DLL 修复工具。**
-扫描 → 定位 → 下载（官方安装包或单文件）→ 校验 → 静默安装或覆盖，全过程有日志、可审计。
+**一键体检并修复 Windows 运行库与系统 DLL —— 开源、可审计、有日志**
 
-> English: An open-source (GPL-3.0) Windows runtime & system DLL repair tool — scan, locate, download, verify, install, with full logging.
-> 本项目是独立实现，与 4DDiG / Tenorshare 等商业软件**没有任何关联**。
+[![Release](https://img.shields.io/github/v/release/as851500663/DllSmith?include_prereleases&label=release)](../../releases)
+[![Downloads](https://img.shields.io/github/downloads/as851500663/DllSmith/total?label=downloads)](../../releases)
+[![License](https://img.shields.io/badge/license-GPL--3.0-blue.svg)](LICENSE)
+[![Platform](https://img.shields.io/badge/platform-Windows%207%20SP1%2B%20x64-0078D6.svg)](#系统要求)
+[![.NET](https://img.shields.io/badge/.NET%20Framework-4.8-512BD4.svg)](https://dotnet.microsoft.com/)
+[![Stars](https://img.shields.io/github/stars/as851500663/DllSmith?style=flat)](../../stargazers)
 
-![主界面](docs/screenshots/main.png)
+[简体中文](README.md) · [English](README.en.md) · [下载](../../releases) · [版本记录](docs/versions.md) · [问题反馈](../../issues)
+
+</div>
 
 ---
 
-## 它能解决什么问题
+## 目录
 
-| 场景 | 表现 | DllSmith 怎么做 |
+- [它解决什么问题](#它解决什么问题)
+- [功能特性](#功能特性)
+- [界面预览](#界面预览)
+- [快速开始](#快速开始)
+- [工作原理](#工作原理)
+- [技术架构](#技术架构)
+- [从源码构建](#从源码构建)
+- [常见问题](#常见问题)
+- [路线图](#路线图)
+- [已知限制](#已知限制)
+- [参与贡献](#参与贡献)
+- [许可](#许可)
+
+---
+
+## 它解决什么问题
+
+Windows 上的“缺 DLL”几乎是每个用户都会遇到的故障，但排查路径极其分散：有人去搜 `VCRUNTIME140.dll` 下载站，有人重装系统，有人装一堆“运行库合集”把系统搞乱。
+
+DllSmith 把这件事收敛成三步：**体检 → 看清单 → 一键修复**。
+
+| 典型症状 | 背后原因 | DllSmith 的处理 |
 |---|---|---|
-| 新装/精简版系统缺运行库 | 软件打不开，提示缺少 `VCRUNTIME140.dll`、`MSVCP140.dll` | 检测 Microsoft Visual C++ 2005–2022 运行库，缺哪个装哪个（静默参数 `/q /norestart`） |
-| 游戏启动失败 | DirectX 相关 DLL 缺失、黑屏、闪退 | 校验 DirectX 组件与 `d3dcompiler_*.dll`，按需补齐 |
-| 0xc000007b / 应用初始化失败 | 32/64 位混淆、系统 DLL 缺失 | 同时识别 x86 / x64 两套组件，按架构匹配 |
-| `api-ms-win-*-l1-*-0.dll` 找不到 | UWP/新版程序无法启动 | 校验 DownLevel 组件集合 |
-| 系统 DLL 被误删、被“优化软件”清掉 | 资源管理器/程序报错 | 从镜像源拉取同名文件，覆盖前自动备份 |
-| 不知道到底缺什么 | 只能靠人肉搜索 | 一键体检：运行库 + DirectX + 系统 DLL 全量扫描，给出缺失清单 |
+| 打开软件提示「找不到 VCRUNTIME140.dll」 | 缺 Microsoft Visual C++ 运行库 | 识别 VC++ 2005–2022 各版本，缺哪个装哪个（静默 `/q /norestart`） |
+| 游戏黑屏、闪退、提示 D3D 相关错误 | DirectX 组件缺失或版本不匹配 | 校验 DirectX 组件与 `d3dcompiler_*.dll` |
+| 启动报 `0xc000007b` | 32/64 位组件错配、系统 DLL 缺失 | 同时识别 x86 / x64 两套组件，按架构精确匹配 |
+| 提示缺少 `api-ms-win-*-l1-*-0.dll` | DownLevel API 集缺失 | 校验 DownLevel 组件集合 |
+| 系统 DLL 被误删、被“优化软件”清掉 | 文件确实不在了 | 从目录源取同名文件，覆盖前自动备份 |
+| 不知道到底缺什么 | 没有可信的检测手段 | 一键体检 + 缺失清单 + 执行日志 |
 
-> 不修改系统策略、不写开机启动、不驻留进程；所有改动都写日志，可回滚。
+> 不改系统策略、不写开机启动、不驻留后台进程；所有改动都有日志，可回溯。
 
 ---
 
-## 主要功能
+## 功能特性
+
+### 检测
 
 - **五个功能页**：全面体检 / 运行库修复 / DirectX 修复 / 系统 DLL 修复 / 系统文件下载
-- **三种判定口径**（避免误报）：
-  1. 文件存在性（系统 DLL、单文件组件）
-  2. 卸载表 `DisplayName` 匹配（运行库，含产品族 + 年份 + 架构的模糊匹配）
-  3. `MATCH` 通配 + **WinSxS 索引**（VC 组件常见于侧边存储，需要按文件名在 WinSxS 里找）
-  - 无法判定的条目归为 `Unknown`，**既不算正常也不算缺失**，不会被误修
-- **一键修复只处理“缺失”项**，执行前二次确认：`将修复 N 项缺失组件，自动跳过 M 项正常组件`
-- **下载地址自适应**：先用目录里的普通 CDN 地址，失败自动改用对象存储签名地址
-- **载荷解密**：`*_encrypt` 载荷为 AES-128-CBC（IV 前置），解密校验后再安装
-- **修复动作**：`.exe/.msi` 静默安装（超时 + 退出码判定）；`.7z` 解压；单文件直接覆盖（WOW64 重定向处理 + `.rebuild.bak` 备份）
-- **在线目录**：客户端从目录服务按系统（Win7/8/10/11 × x86/x64）拉取清单，不用把十几个版本目录塞进安装包
-- **强制更新**：发布新版本后，旧客户端启动即提示更新，不更新不能继续使用
-- **在线状态上报**：客户端每 60 秒发送一次心跳，用于版本分布统计
-- **完整日志**：`Logs\` 按天滚动，控制台式日志面板可一键清空
+- **三种判定口径**，按数据形态自动选择：
+  1. **文件存在性** —— 系统 DLL、单文件组件
+  2. **卸载表匹配** —— 运行库，按 `DisplayName` 做「产品族 + 年份 + 架构」模糊匹配，避免 `2022 X64 Additional Runtime - 14.x` 这类名字差异导致漏判
+  3. **通配 + WinSxS 索引** —— VC 组件常只存在于侧边存储，用一次性目录索引判定，不逐条全盘扫描
+- **Unknown 不等于缺失**：无法判定的条目单独归类，既不算正常也不算缺失，**不会进入修复队列**
+- **双注册表视图**：同时读 `Registry64` / `Registry32`，并对 32 位进程关闭 WOW64 文件系统重定向
+
+### 修复
+
+- 只处理**确认缺失**的项目，执行前二次确认：`将修复 N 项缺失组件，自动跳过 M 项正常组件`
+- 下载地址自适应：目录里的普通地址失败时，自动改用对象存储签名地址
+- 载荷解密：`*_encrypt` 载荷为 AES-128-CBC（IV 前置），解密后校验文件头（`MZ` / `7z` / `PK`）
+- 三种落地方式：`.exe/.msi` 静默安装（退出码 + 超时判定）、`.7z` 解压、单文件覆盖（带 `*.rebuild.bak` 备份）
+- 修复后状态回写列表，百分位进度 + 实时日志
+
+### 工程
+
+- 界面完全用代码构建（无 XAML 编译步骤），`csc` 一条命令即可产出 exe
+- 客户端可接目录服务：按系统（Win7/8/10/11 × x86/x64）下发清单，安装包不必内置十几套目录
+- 启动检查更新，强制更新模式下必须升级才能继续使用（下载后校验 SHA256）
+- 完整日志：`Logs\` 按天滚动，界面内置控制台式日志面板
+- 安装包：Inno Setup 单文件安装器，桌面快捷方式、开始菜单、干净卸载
 
 ---
 
-## 截图
+## 界面预览
 
-### 主界面（全面体检）
-![主界面](docs/screenshots/main.png)
+<div align="center">
 
-### 安装向导（自定义左侧图 + 图标，桌面快捷方式）
-![安装向导](docs/screenshots/installer.png)
+**全面体检** — 缺失清单、状态胶囊、执行日志
+<img src="docs/screenshots/main.png" width="880">
 
+**安装向导** — 单文件安装、自定义品牌图、桌面图标
+<img src="docs/screenshots/installer.png" width="560">
 
+</div>
+
+---
+
+## 快速开始
+
+### 下载
+
+所有版本都在 **[Releases](../../releases)** 发布，每个版本附带：
+
+- `DllSmith-Setup-x.y.z.exe` — 安装包（约 2.8 MB）
+- 发布说明 — 本次改动、修复项、SHA256
+
+> 最新版本：[![Latest](https://img.shields.io/github/v/release/as851500663/DllSmith?label=)](../../releases/latest)
+
+### 系统要求
+
+| 项 | 要求 |
+|---|---|
+| 系统 | Windows 7 SP1 / 8 / 8.1 / 10 / 11（x64） |
+| 运行时 | .NET Framework 4.8（Win10 1809+ 自带） |
+| 权限 | 修复系统目录需管理员权限（程序会提示提权） |
+| 磁盘 | 约 20 MB（含目录数据） |
+
+### 使用
+
+1. 安装后从桌面图标启动，程序自动开始体检
+2. 「缺失 / 待修复」卡片即为待处理数量，可逐项勾选
+3. 点「一键修复」，确认后开始：下载 → 校验 → 安装/覆盖
+4. 完成后可再次扫描复核；日志在 `Logs\` 目录
 
 ---
 
 ## 工作原理
 
 ```
-① 取目录   服务端 /api/v1/catalog?key=<系统_架构>   ← 失败回退本地 Json\
-             ↓
-② 扫描     逐条判定：文件存在 / 卸载表名称 / MATCH 通配(WinSxS 索引)
-             ↓ 结果：正常 / 缺失 / 未知（未知不参与修复）
-③ 修复     仅处理“缺失”且勾选的项
-             ↓
-④ 下载     普通地址 → 失败回退 OSS 签名地址（oss_key 规则：去 /DLL/ 段 + 补 _encrypt）
-             ↓
-⑤ 解密     首 16 字节 IV + AES-128-CBC 密文 → 校验文件头（MZ / 7z / PK）
-             ↓
-⑥ 落地     安装包静默安装 / 压缩包 7z 解压 / 单文件覆盖（带备份）
-             ↓
-⑦ 复核     状态回写列表，日志落盘
+① 取目录   GET /api/v1/catalog?key=<系统_架构>      ← 失败回退本地 Json\
+              ↓
+② 扫描     逐条判定：文件存在 / 卸载表名称 / MATCH 通配（WinSxS 索引）
+              ↓ 结果：正常 · 缺失 · 未知（未知不参与修复）
+③ 修复     仅处理「缺失」且被勾选的项
+              ↓
+④ 下载     普通地址 → 失败回退签名地址（oss_key = 路径去 /DLL/ + 补 _encrypt）
+              ↓
+⑤ 解密     首 16 字节 IV + AES-128-CBC 密文 → 校验文件头
+              ↓
+⑥ 落地     静默安装 / 7z 解压 / 单文件覆盖（WOW64 + 备份）
+              ↓
+⑦ 复核     状态回写、日志落盘
 ```
 
-服务端还会下发版本信息（`/api/v1/update`），客户端据此强制更新。
+目录服务接口（客户端侧）：
 
----
-
-## 快速开始
-
-## 版本与下载
-
-| 版本 | 时间 | 主要内容 | 下载 |
-|---|---|---|---|
-| **v1.0.1**（最新，强制更新） | 2026-11-13 | 修复“一键修复误修正常项”、WinSxS 匹配、安装向导优化 | [本站](http://123.57.94.141:8787/files/DllSmith-Setup-1.0.1.exe) · [GitHub](https://github.com/as851500663/DllSmith/releases/download/v1.0.1/DllSmith-Setup-1.0.1.exe) |
-| v1.0.0 | 2026-11-13 | 首个可运行版本：五页体检、识别与修复、目录服务对接 | [本站](http://123.57.94.141:8787/files/DllSmith-Setup-1.0.0.exe) |
-
-- 在线版本页（自动生成）：<http://123.57.94.141:8787/versions>
-- 完整更新日志：[docs/versions.md](docs/versions.md)
-- SHA256（1.0.1）：`c74b663bb58c32cb58874eea283d1911003ba5275af510a240bb9bcd63a5ba45`
-
----
-### 方式一：安装包
-
-| 下载源 | 地址 |
+| 接口 | 用途 |
 |---|---|
-| 官方下载页（推荐） | http://123.57.94.141:8787/download |
-| 直链 | http://123.57.94.141:8787/files/DllSmith-Setup-1.0.1.exe |
-| GitHub Releases（镜像） | https://github.com/as851500663/DllSmith/releases/latest |
-
-1. 下载 `DllSmith-Setup-1.0.1.exe`（2.7 MB）
-2. 双击安装（默认装到 `C:\Program Files\DllSmith`，会在桌面创建快捷方式）
-3. 打开后会自动体检；勾选「缺失」项 → 一键修复
-
-> SHA256：`c74b663bb58c32cb58874eea283d1911003ba5275af510a240bb9bcd63a5ba45`
-> 安装包未做代码签名，Windows SmartScreen 可能提示「未知发布者」，选择「更多信息 → 仍要运行」。
-
-> 修复 `C:\Windows\System32` 下的文件需要管理员权限，程序会提示提权。
-
-### 方式二：从源码构建
-
-依赖：Windows + .NET Framework 4.8（系统自带）、`csc.exe`（`C:\Windows\Microsoft.NET\Framework\v4.0.30319\`）
-
-```powershell
-# 客户端（产物在 bin\）
-powershell -ExecutionPolicy Bypass -File .\build.ps1
-
-# 安装包（需 Inno Setup 7）
-& "C:\Program Files\Inno Setup 7\ISCC.exe" .\installer\DllSmith.iss
-```
-
-运行客户端需要目录数据：把 `Json\` 放到 exe 同目录，或在 `config.json` 里指向目录服务：
-
-```json
-{ "server": "http://your-server:8787" }
-```
-
-### 方式三：对接目录服务（接口公开）
-
-客户端与目录服务之间是**纯 HTTP + JSON**，接口契约如下，你可以自行实现兼容服务：
-
-| 接口 | 说明 |
-|---|---|
-| `GET /api/v1/catalog?key=<目录键>` | 返回条目数组，字段与原目录 JSON 兼容（`FILENAME/FILEPATH/DOWNLOAD` 或 `DISPLAYNAME/DISPLAYVERIONS/MATCH/DOWNLOADDLL`） |
-| `GET /api/v1/update?version=<客户端版本>&channel=stable` | `{"update":bool,"version":"x.y.z","url":"...","sha256":"...","notes":"...","mandatory":bool}` |
-| `POST /api/v1/ping`（表单 `machine`、`version`） | 在线心跳，仅用于统计 |
+| `GET /api/v1/catalog?key=<目录键>` | 拉取条目数组（字段与原目录 JSON 兼容） |
+| `GET /api/v1/update?version=<版本>` | 更新检查：版本号、下载地址、SHA256、说明、是否强制 |
+| `POST /api/v1/ping` | 在线心跳，仅用于版本分布统计 |
 | `GET /api/v1/health` | 健康检查 |
 
-在 exe 同目录的 `config.json` 写入服务地址即可：
+`config.json` 放在 exe 同目录即可指定服务地址：
 
 ```json
 { "server": "http://your-server:8787" }
 ```
 
-> 目录服务按上述契约提供，`config.json` 里的地址指向可用的服务即可。
-
 ---
 
-## 目录结构
+## 技术架构
+
+| 模块 | 文件 | 职责 |
+|---|---|---|
+| 入口 | `src/Program.cs` | 单实例、异常兜底、`--scan-report` 自检 |
+| 核心 | `src/Core.cs` | 路径与日志、JSON、目录模型、系统探测、扫描判定 |
+| 网络 | `src/ApiClient.cs` | 目录拉取、更新检查、下载地址解析、心跳 |
+| 载荷 | `src/Payload.cs` | `*_encrypt` 解密（AES-128-CBC） |
+| 修复 | `src/RepairEngine.cs` | 下载、解密、解压、安装、文件覆盖 |
+| 界面 | `src/Ui.cs` | WPF 界面（纯代码，主题/控件/页面） |
+| 打包 | `installer/DllSmith.iss` | Inno Setup 安装包脚本 |
 
 ```
 DllSmith/
-├─ build.ps1                  # 客户端构建（csc + win32icon + 自动写 config.json）
-├─ src/
-│  ├─ Program.cs              # 入口 / 单实例 / --scan-report 自检
-│  ├─ Core.cs                 # 路径、日志、JSON、目录模型、系统探测、扫描判定
-│  ├─ ApiClient.cs            # 目录服务 / 更新检查 / 下载地址解析 / 心跳
-│  ├─ Payload.cs              # *_encrypt 载荷解密
-│  ├─ RepairEngine.cs         # 下载 / 解密 / 解压 / 安装 / 覆盖
-│  ├─ Ui.cs                   # WPF 界面（纯代码构建，无需 XAML 编译）
-│  └─ app.manifest, app.ico   # 清单与图标
-├─ installer/                 # Inno Setup 脚本与向导素材
-└─ docs/screenshots/          # 文档截图
+├─ build.ps1                  # 客户端构建（csc + win32icon + 写 config.json）
+├─ src/                       # 客户端源码
+├─ installer/                 # 安装包脚本与素材
+├─ docs/
+│  ├─ versions.md             # 版本历史与发版流程
+│  └─ screenshots/            # 文档截图
+├─ README.md                  # 中文说明
+└─ README.en.md               # English
 ```
 
 ---
 
-## 版本与更新策略
+## 从源码构建
 
-| 服务端状态 | 客户端行为 |
-|---|---|
-| 无更新 / 未配置 server / 请求失败 | 静默继续，本地照常可用 |
-| 有更高版本 | 弹「需要更新」，**只有确定**：下载 → SHA256 校验 → 启动安装包 → 自身退出 |
-| 下载或校验失败 | 提示后退出（不允许用旧版本继续跑） |
+```powershell
+# 1) 编译客户端（产物在 bin\，需 .NET Framework 4.8 自带的 csc.exe）
+powershell -ExecutionPolicy Bypass -File .\build.ps1
+
+# 2) 打包安装器（需 Inno Setup 7）
+& "C:\Program Files\Inno Setup 7\ISCC.exe" .\installer\DllSmith.iss
+```
+
+运行前需要有目录数据：把 `Json\` 放到 exe 同目录，或在 `config.json` 指向可用的目录服务。
+
+自检命令：
+
+```powershell
+# 跑一遍完整扫描并把每条判定写入文件（排查"为什么会判缺失"）
+.\bin\DllSmith.exe --scan-report .\scan-report.txt
+```
+
+---
+
+## 常见问题
+
+<details>
+<summary><b>扫描显示缺失，但我确定装过运行库？</b></summary>
+
+多半是安装的是同族但不同年份/架构的包。展开该条目可以看到判定依据（文件路径 / 卸载表名称）；也可以跑 `--scan-report` 看完整结论。
+</details>
+
+<details>
+<summary><b>修复到一半失败怎么办？</b></summary>
+
+日志面板与 `Logs\` 会记录每一步（下载地址、HTTP 状态、解密结果、安装退出码）。常见原因是下载源不可达或安装包被安全软件拦截。
+</details>
+
+<details>
+<summary><b>会不会把正常文件改坏？</b></summary>
+
+不会碰“正常”条目：修复队列只包含判定为缺失的项目，执行前还会列出数量确认；覆盖单个 DLL 时会先写 `*.rebuild.bak` 备份。
+</details>
+
+<details>
+<summary><b>支持 32 位系统吗？</b></summary>
+
+当前版本面向 x64；32 位目录数据在服务端存在，但安装包与检测逻辑优先保证 x64 正确性。
+</details>
+
+<details>
+<summary><b>为什么启动时提示必须更新？</b></summary>
+
+客户端按目录服务的最新版本做强制更新：下载 → 校验 SHA256 → 启动安装包 → 退出自身。这样能保证修复规则始终是最新的。
+</details>
+
+---
+
+## 路线图
+
+- [x] 五种组件检测与修复闭环
+- [x] 目录服务 + 在线更新 + 强制更新
+- [x] 单文件安装包与桌面图标
+- [ ] 修复历史与回滚中心（按次记录改动了哪些文件）
+- [ ] 离线模式：内置精简目录 + 本地缓存安装包
+- [ ] 多语言界面（English / 繁體中文）
+- [ ] 托盘化与计划任务体检
+- [ ] 代码签名，消除 SmartScreen 提示
 
 ---
 
 ## 已知限制
 
-- 目录里的普通 CDN 地址可能失效，此时依赖对象存储签名地址；两者都不可达时该条目会报下载失败
-- 单文件覆盖只备份为 `*.rebuild.bak`，没有系统还原点级别的回滚
-- 服务端默认 HTTP，部署到公网请在前面加 Nginx/Caddy 做 TLS
-- 仅中文界面；多语言文案尚未接入
-- 目录数据（`Json\`）是运行期资产，仓库不附带，请自建或由服务端下发
-- 目录服务默认走 HTTP，公网部署建议自行加 TLS 反代
+- 目录条目依赖上游下载源，个别老版本安装包可能已下线
+- 单文件覆盖只做 `*.rebuild.bak` 备份，没有系统还原点级回滚
+- 目录数据（`Json\`）属运行期资产，仓库不内置
+- 仅提供 x64 安装包
 
 ---
 
 ## 参与贡献
 
-欢迎 issue / PR：补充语言、改进判定规则、优化界面与日志、完善安装包都可以。
-提交前请确保 `powershell -File .\build.ps1` 能编译通过，并跑一次 `--scan-report` 附上结果。
+欢迎 issue / PR。可以做的事：
+
+- 补充/修正目录条目与下载源
+- 改进判定规则（尤其是运行库家族匹配）
+- 界面细节、文案、多语言
+- 打包与 CI（自动化构建 + Release 发布）
+
+提交前请确保：
+
+```powershell
+powershell -File .\build.ps1           # 能编译
+.\bin\DllSmith.exe --scan-report .\r.txt   # 能跑完扫描
+```
 
 ---
 
 ## 许可
 
-[GPL-3.0](LICENSE)。本程序按“现状”提供，不附带任何担保；修改系统目录前请自行备份。
+[GPL-3.0](LICENSE)。本程序按“现状”提供，不附带任何担保；修改系统目录前请自行备份重要数据。
+
+<div align="center">
+
+**如果这个项目帮到了你，欢迎点一个 ⭐**
+
+</div>

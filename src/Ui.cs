@@ -96,7 +96,7 @@ namespace DllFix.Ui
             catch (Exception ex) { Log.Error("icon load failed", ex); }
         }
 
-        // ── 在线心跳（每 60s 上报一次，仅用于在线设备统计） ─────────────────
+        // ── 在线心跳（每 60s 上报一次，后台据此统计在线人数） ───────────────
         private void StartHeartbeat()
         {
             Thread t = new Thread(delegate()
@@ -258,18 +258,63 @@ namespace DllFix.Ui
             ver.Foreground = Theme.TextMuted;
             ver.HorizontalAlignment = HorizontalAlignment.Right;
             TextBlock repo = new TextBlock();
-            repo.Text = "开源 · 目录可自建";
+            repo.Text = "GitHub 开源项目";
             repo.FontSize = 12;
             repo.Foreground = new SolidColorBrush(Color.FromRgb(0x8B, 0x9B, 0xB0));
             repo.Margin = new Thickness(0, 6, 0, 0);
             repo.HorizontalAlignment = HorizontalAlignment.Right;
+
+            // 访问官网
+            Button site = new Button();
+            site.Content = "访问官网  ↗";
+            site.FontSize = 12.5;
+            site.Height = 30;
+            site.Padding = new Thickness(14, 0, 14, 0);
+            site.Margin = new Thickness(0, 8, 0, 0);
+            site.HorizontalAlignment = HorizontalAlignment.Right;
+            site.Cursor = System.Windows.Input.Cursors.Hand;
+            site.Foreground = new SolidColorBrush(Color.FromRgb(0x1F, 0x6F, 0xE0));
+            site.Background = new SolidColorBrush(Color.FromRgb(0xEB, 0xF3, 0xFF));
+            site.BorderBrush = new SolidColorBrush(Color.FromRgb(0xCF, 0xDF, 0xF7));
+            site.BorderThickness = new Thickness(1);
+            site.Template = BuildPillTemplate(new CornerRadius(9));
+            site.Click += delegate { OpenSite(); };
+
             right.Children.Add(ver);
             right.Children.Add(repo);
+            right.Children.Add(site);
             Grid.SetColumn(right, 2);
             g.Children.Add(right);
 
             banner.Child = g;
             return banner;
+        }
+
+        /// <summary>打开官网下载页</summary>
+        private void OpenSite()
+        {
+            try
+            {
+                System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo(AppInfo.SiteUrl)
+                {
+                    UseShellExecute = true
+                });
+            }
+            catch (Exception ex) { Log.Error("open site failed", ex); }
+        }
+
+        /// <summary>圆角按钮模板（无默认边框，hover 变色）</summary>
+        private static ControlTemplate BuildPillTemplate(CornerRadius radius)
+        {
+            string xaml =
+                "<ControlTemplate xmlns='http://schemas.microsoft.com/winfx/2006/xaml/presentation'" +
+                " TargetType='Button'>" +
+                "  <Border CornerRadius='" + radius.TopLeft + "' Background='{TemplateBinding Background}'" +
+                "          BorderBrush='{TemplateBinding BorderBrush}' BorderThickness='{TemplateBinding BorderThickness}'>" +
+                "    <ContentPresenter HorizontalAlignment='Center' VerticalAlignment='Center'/>" +
+                "  </Border>" +
+                "</ControlTemplate>";
+            return (ControlTemplate)XamlReader.Parse(xaml);
         }
 
         // ── 左侧导航 ───────────────────────────────────────────────────────
