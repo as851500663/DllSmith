@@ -41,6 +41,20 @@ namespace DllFix
                 return SelfTest(args[1]);
             }
 
+            // 预览：--preview-update 单独显示更新下载进度窗（UI 核对用）
+            if (args != null && args.Length >= 1 && args[0] == "--preview-update")
+            {
+                Application pv = new Application();
+                pv.ShutdownMode = ShutdownMode.OnMainWindowClose;
+                UpdateInfo fake = new UpdateInfo();
+                fake.HasUpdate = true;
+                fake.Version = "1.0.4";
+                UpdateDialog dlg = new UpdateDialog(fake);
+                dlg.SetProgress(38, 1084000, 2854000);
+                dlg.Show();
+                return pv.Run(dlg);
+            }
+
             // 自检：--scan-report <outFile> 扫描并输出每个条目的判定（核对"哪些会被修复"）
             if (args != null && args.Length >= 2 && args[0] == "--scan-report")
             {

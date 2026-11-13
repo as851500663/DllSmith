@@ -244,15 +244,43 @@ namespace DllFix.Core
         /// <summary>下载安装包到临时目录并启动，返回是否成功</summary>
         public static bool DownloadAndRun(UpdateInfo info)
         {
+            if (!Download(info, null)) return false;
+            return RunInstaller(info);
+        }
+
+        /// <summary>下载更新包（可回调进度：百分比 / 已下载 / 总大小），并校验 SHA256</summary>
+        public static bool Download(UpdateInfo info, Action<int, long, long> progress)
+        {
             try
             {
                 string file = System.IO.Path.Combine(System.IO.Path.GetTempPath(),
                     "DllSmith-" + info.Version + ".exe");
-                using (System.Net.WebClient wc = new System.Net.WebClient())
+                // 自己按块读，保证每次都有进度回调（WebClient 的进度事件在无 UI 上下文时不够可靠）
+                System.Net.HttpWebRequest req = (System.Net.HttpWebRequest)System.Net.WebRequest.Create(info.Url);
+                req.UserAgent = "DllSmith/" + AppInfo.Version;
+                req.Timeout = 30000;
+                req.ReadWriteTimeout = 60000;
+                using (System.Net.HttpWebResponse resp = (System.Net.HttpWebResponse)req.GetResponse())
+                using (System.IO.Stream net = resp.GetResponseStream())
+                using (System.IO.FileStream fs = System.IO.File.Create(file))
                 {
-                    wc.Headers.Add("User-Agent", "DllSmith/" + AppInfo.Version);
-                    wc.DownloadFile(info.Url, file);
+                    long total = resp.ContentLength;
+                    byte[] buf = new byte[65536];
+                    long got = 0;
+                    int n;
+                    while ((n = net.Read(buf, 0, buf.Length)) > 0)
+                    {
+                        fs.Write(buf, 0, n);
+                        got += n;
+                        if (progress != null)
+                        {
+                            int pct = total > 0 ? (int)(got * 100L / total) : 0;
+                            progress(pct, got, total);
+                        }
+                    }
                 }
+                if (progress != null) progress(100, 0, 0);
+
                 if (!string.IsNullOrEmpty(info.Sha256))
                 {
                     string hash;
@@ -265,12 +293,30 @@ namespace DllFix.Core
                         return false;
                     }
                 }
-                System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo(file) { UseShellExecute = true });
+                Log.Info("update downloaded: " + file);
                 return true;
             }
             catch (Exception ex)
             {
                 Log.Error("update download failed", ex);
+                return false;
+            }
+        }
+
+        /// <summary>启动下载好的安装包</summary>
+        public static bool RunInstaller(UpdateInfo info)
+        {
+            try
+            {
+                string file = System.IO.Path.Combine(System.IO.Path.GetTempPath(),
+                    "DllSmith-" + info.Version + ".exe");
+                if (!System.IO.File.Exists(file)) return false;
+                System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo(file) { UseShellExecute = true });
+                return true;
+            }
+            catch (Exception ex)
+            {
+                Log.Error("update run failed", ex);
                 return false;
             }
         }

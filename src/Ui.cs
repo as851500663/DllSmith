@@ -16,6 +16,8 @@ using System.Windows.Controls;
 using System.Windows.Controls.Primitives;
 using System.Windows.Markup;
 using System.Windows.Media;
+using System.Windows.Media.Animation;
+using System.Windows.Data;
 using DllFix.Core;
 
 namespace DllFix.Ui
@@ -52,7 +54,9 @@ namespace DllFix.Ui
     {
         private readonly ContentControl _host = new ContentControl();
         private readonly TextBlock _status = new TextBlock();
-        private readonly TextBlock _percent = new TextBlock();
+        private readonly TextBlock _percent = new TextBlock();     // 下载百分比（状态栏内）
+        private readonly Canvas _spin = new Canvas();              // 下载小圆圈
+        private readonly RotateTransform _spinRot = new RotateTransform(0);
         private readonly ProgressBar _bar = new ProgressBar();
         private readonly List<Button> _navItems = new List<Button>();
         private readonly List<TextBlock> _navLabels = new List<TextBlock>();
@@ -136,15 +140,35 @@ namespace DllFix.Ui
                 + " 已停止支持。\n\n" + notes + "\n\n点击「确定」开始更新，更新过程中请勿关闭程序。",
                 "需要更新", MessageBoxButton.OK, MessageBoxImage.Warning);
 
-            if (UpdateService.DownloadAndRun(info))
-            {
-                Application.Current.Shutdown();
-                return;
-            }
+            // 确定后弹出下载进度窗（百分比 + 进度条），下载完自动启动安装包
+            UpdateDialog dlg = new UpdateDialog(info);
+            dlg.Owner = this;
+            dlg.Show();
 
-            MessageBox.Show("更新包下载或 SHA256 校验失败，请联系管理员（详情见 Logs）。", "更新失败",
-                MessageBoxButton.OK, MessageBoxImage.Error);
-            Application.Current.Shutdown();
+            Thread t = new Thread(delegate()
+            {
+                bool ok = UpdateService.Download(info, delegate(int pct, long got, long total)
+                {
+                    dlg.Dispatcher.BeginInvoke(new Action(delegate { dlg.SetProgress(pct, got, total); }));
+                });
+
+                dlg.Dispatcher.BeginInvoke(new Action(delegate
+                {
+                    if (!ok)
+                    {
+                        dlg.Close();
+                        MessageBox.Show("更新包下载或 SHA256 校验失败，请联系管理员（详情见 Logs）。", "更新失败",
+                            MessageBoxButton.OK, MessageBoxImage.Error);
+                        Application.Current.Shutdown();
+                        return;
+                    }
+                    dlg.SetStatus("下载完成，正在启动安装程序…");
+                    UpdateService.RunInstaller(info);
+                    Application.Current.Shutdown();
+                }));
+            });
+            t.IsBackground = true;
+            t.Start();
         }
 
         private void ApplyUpdate(UpdateInfo info)
@@ -435,8 +459,9 @@ namespace DllFix.Ui
             page.StatusChanged += delegate(string s, int percent, bool busy)
             {
                 _status.Text = s;
-                _bar.Value = percent;
-                _bar.IsIndeterminate = busy;
+                bool downloading = busy && percent > 0 && percent < 100;
+                _spin.Visibility = downloading ? Visibility.Visible : Visibility.Collapsed;
+                _percent.Visibility = downloading ? Visibility.Visible : Visibility.Collapsed;
                 _percent.Text = percent + "%";
             };
             _host.Content = page;
@@ -454,19 +479,14 @@ namespace DllFix.Ui
             return all;
         }
 
-        // ── 底部状态栏 ─────────────────────────────────────────────────────
+        // ── 底部状态栏（状态 + 下载圆圈 + 百分比） ─────────────────────────
         private UIElement BuildFooter()
         {
             Border footer = new Border();
             footer.Background = Brushes.White;
             footer.BorderBrush = Theme.CardLine;
             footer.BorderThickness = new Thickness(0, 1, 0, 0);
-            footer.Padding = new Thickness(24, 12, 24, 12);
-
-            Grid g = new Grid();
-            g.ColumnDefinitions.Add(new ColumnDefinition());
-            g.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(160) });
-            g.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(300) });
+            footer.Padding = new Thickness(24, 11, 24, 11);
 
             StackPanel left = new StackPanel { Orientation = Orientation.Horizontal, VerticalAlignment = VerticalAlignment.Center };
             TextBlock info = new TextBlock();
@@ -475,35 +495,172 @@ namespace DllFix.Ui
             info.FontSize = 13;
             info.Foreground = Theme.Primary;
             info.Margin = new Thickness(0, 0, 8, 0);
+            info.VerticalAlignment = VerticalAlignment.Center;
             _status.Text = "就绪";
             _status.FontSize = 13;
             _status.Foreground = Theme.TextBody;
             _status.VerticalAlignment = VerticalAlignment.Center;
             left.Children.Add(info);
             left.Children.Add(_status);
-            g.Children.Add(left);
+
+            // 下载时转圈的小圆圈
+            _spin.Width = 15;
+            _spin.Height = 15;
+            _spin.Margin = new Thickness(12, 0, 0, 0);
+            _spin.VerticalAlignment = VerticalAlignment.Center;
+            _spin.Visibility = Visibility.Collapsed;
+            System.Windows.Shapes.Path arc = new System.Windows.Shapes.Path();
+            arc.Stroke = Theme.Primary;
+            arc.StrokeThickness = 2;
+            arc.StrokeStartLineCap = PenLineCap.Round;
+            arc.StrokeEndLineCap = PenLineCap.Round;
+            arc.Data = Geometry.Parse("M 7.5,1.5 A 6,6 0 0 1 13.5,7.5");
+            arc.RenderTransformOrigin = new Point(0.5, 0.5);
+            arc.RenderTransform = _spinRot;
+            _spin.Children.Add(arc);
+            DoubleAnimation spinAnim = new DoubleAnimation(0, 360, new Duration(TimeSpan.FromMilliseconds(900)));
+            spinAnim.RepeatBehavior = RepeatBehavior.Forever;
+            _spinRot.BeginAnimation(RotateTransform.AngleProperty, spinAnim);
+            left.Children.Add(_spin);
 
             _percent.Text = "0%";
-            _percent.FontSize = 13;
-            _percent.Foreground = Theme.TextMuted;
-            _percent.HorizontalAlignment = HorizontalAlignment.Right;
+            _percent.FontSize = 12.5;
+            _percent.Foreground = Theme.Primary;
+            _percent.Margin = new Thickness(8, 0, 0, 0);
             _percent.VerticalAlignment = VerticalAlignment.Center;
-            Grid.SetColumn(_percent, 1);
-            g.Children.Add(_percent);
+            _percent.Visibility = Visibility.Collapsed;
+            left.Children.Add(_percent);
 
-            _bar.Height = 8;
+            footer.Child = left;
+            return footer;
+        }
+    }
+
+    // ── 更新下载进度窗 ─────────────────────────────────────────────────────
+    public class UpdateDialog : Window
+    {
+        private readonly ProgressBar _bar = new ProgressBar();
+        private readonly TextBlock _pct = new TextBlock();
+        private readonly TextBlock _detail = new TextBlock();
+        private readonly TextBlock _status = new TextBlock();
+
+        public UpdateDialog(UpdateInfo info)
+        {
+            Title = "正在更新 DllSmith";
+            Width = 520;
+            Height = 236;
+            WindowStartupLocation = WindowStartupLocation.CenterScreen;
+            WindowStyle = WindowStyle.None;
+            ResizeMode = ResizeMode.NoResize;
+            AllowsTransparency = true;
+            Background = Brushes.Transparent;
+            ShowInTaskbar = false;
+            Topmost = true;
+
+            Border card = new Border();
+            card.Background = Brushes.White;
+            card.CornerRadius = new CornerRadius(18);
+            card.BorderBrush = new SolidColorBrush(Color.FromRgb(0xE2, 0xEA, 0xF7));
+            card.BorderThickness = new Thickness(1);
+            card.Padding = new Thickness(28, 24, 28, 22);
+
+            StackPanel root = new StackPanel();
+
+            // 标题行
+            StackPanel head = new StackPanel { Orientation = Orientation.Horizontal };
+            Border logo = new Border();
+            logo.Width = 36;
+            logo.Height = 36;
+            logo.CornerRadius = new CornerRadius(11);
+            logo.Background = new LinearGradientBrush(Color.FromRgb(0x42, 0x8E, 0xF8), Color.FromRgb(0x18, 0x5C, 0xD0), 90);
+            TextBlock lt = new TextBlock();
+            lt.Text = "DS";
+            lt.Foreground = Brushes.White;
+            lt.FontSize = 15;
+            lt.FontWeight = FontWeights.Bold;
+            lt.HorizontalAlignment = HorizontalAlignment.Center;
+            lt.VerticalAlignment = VerticalAlignment.Center;
+            logo.Child = lt;
+
+            StackPanel tt = new StackPanel { Margin = new Thickness(12, 0, 0, 0), VerticalAlignment = VerticalAlignment.Center };
+            TextBlock t1 = new TextBlock();
+            t1.Text = "正在下载更新 v" + info.Version;
+            t1.FontSize = 15.5;
+            t1.FontWeight = FontWeights.SemiBold;
+            t1.Foreground = new SolidColorBrush(Color.FromRgb(0x12, 0x23, 0x3D));
+            TextBlock t2 = new TextBlock();
+            t2.Text = "请不要关闭窗口，下载完成后会自动启动安装程序";
+            t2.FontSize = 11.5;
+            t2.Margin = new Thickness(0, 4, 0, 0);
+            t2.Foreground = new SolidColorBrush(Color.FromRgb(0x7A, 0x8C, 0xA4));
+            tt.Children.Add(t1);
+            tt.Children.Add(t2);
+
+            head.Children.Add(logo);
+            head.Children.Add(tt);
+            root.Children.Add(head);
+
+            // 进度条
+            _bar.Height = 9;
             _bar.Minimum = 0;
             _bar.Maximum = 100;
             _bar.Value = 0;
-            _bar.Foreground = new SolidColorBrush(Color.FromRgb(0x3A, 0xC4, 0x5A));
-            _bar.Background = new SolidColorBrush(Color.FromRgb(0xE6, 0xEC, 0xF6));
+            _bar.Margin = new Thickness(0, 22, 0, 0);
+            _bar.Foreground = new LinearGradientBrush(Color.FromRgb(0x5A, 0xA0, 0xFA), Color.FromRgb(0x1F, 0x6F, 0xE0), 0);
+            _bar.Background = new SolidColorBrush(Color.FromRgb(0xE9, 0xEF, 0xF9));
             _bar.BorderThickness = new Thickness(0);
-            _bar.VerticalAlignment = VerticalAlignment.Center;
-            Grid.SetColumn(_bar, 2);
-            g.Children.Add(_bar);
+            root.Children.Add(_bar);
 
-            footer.Child = g;
-            return footer;
+            // 百分比 + 已下载/总量
+            Grid infoRow = new Grid { Margin = new Thickness(0, 10, 0, 0) };
+            infoRow.ColumnDefinitions.Add(new ColumnDefinition());
+            infoRow.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+
+            _detail.Text = "正在连接…";
+            _detail.FontSize = 11.5;
+            _detail.Foreground = new SolidColorBrush(Color.FromRgb(0x8A, 0x9B, 0xB2));
+            _detail.VerticalAlignment = VerticalAlignment.Center;
+            infoRow.Children.Add(_detail);
+
+            _pct.Text = "0%";
+            _pct.FontSize = 13;
+            _pct.FontWeight = FontWeights.SemiBold;
+            _pct.Foreground = new SolidColorBrush(Color.FromRgb(0x1F, 0x6F, 0xE0));
+            Grid.SetColumn(_pct, 1);
+            infoRow.Children.Add(_pct);
+            root.Children.Add(infoRow);
+
+            _status.Text = "";
+            _status.FontSize = 11.5;
+            _status.Margin = new Thickness(0, 14, 0, 0);
+            _status.Foreground = new SolidColorBrush(Color.FromRgb(0x9A, 0xA9, 0xBC));
+            root.Children.Add(_status);
+
+            card.Child = root;
+            Content = card;
+        }
+
+        public void SetProgress(int percent, long got, long total)
+        {
+            if (percent < 0) percent = 0;
+            if (percent > 100) percent = 100;
+            _bar.Value = percent;
+            _pct.Text = percent + "%";
+            if (total > 0)
+                _detail.Text = string.Format("{0:0.0} MB / {1:0.0} MB",
+                    got / 1048576.0, total / 1048576.0);
+            else if (got > 0)
+                _detail.Text = string.Format("{0:0.0} MB", got / 1048576.0);
+        }
+
+        public void SetStatus(string text)
+        {
+            _status.Text = text;
+            if (text != null && text.IndexOf("安装程序", StringComparison.Ordinal) >= 0)
+            {
+                _bar.Value = 100;
+                _pct.Text = "100%";
+            }
         }
     }
 
@@ -522,6 +679,10 @@ namespace DllFix.Ui
 
         private readonly ListBox _list = new ListBox();
         private readonly TextBox _logBox = new TextBox();
+        private readonly TextBlock _logLast = new TextBlock();
+        private readonly Button _logToggle = new Button();
+        private Border _logCard;
+        private bool _logExpanded;
         private readonly Button _btnScan = new Button();
         private readonly Button _btnRepair = new Button();
         private readonly Border _allCheck = new Border();
@@ -642,6 +803,7 @@ namespace DllFix.Ui
             table.Children.Add(header);
 
             _list.ItemsSource = _items;
+            ApplySort();
             _list.BorderThickness = new Thickness(0);
             _list.Background = Brushes.White;
             _list.HorizontalContentAlignment = HorizontalAlignment.Stretch;
@@ -758,6 +920,53 @@ namespace DllFix.Ui
             return card;
         }
 
+        /// <summary>缺失置顶、正常在下，其次按名称</summary>
+        private void ApplySort()
+        {
+            if (_items.Count == 0) return;
+            List<CatalogItem> sorted = new List<CatalogItem>(_items);
+            sorted.Sort(delegate(CatalogItem a, CatalogItem b)
+            {
+                int ra = StateRank(a), rb = StateRank(b);
+                if (ra != rb) return ra.CompareTo(rb);
+                return string.Compare(a.Name, b.Name, StringComparison.CurrentCultureIgnoreCase);
+            });
+            _list.ItemsSource = sorted;
+        }
+
+        private static int StateRank(CatalogItem i)
+        {
+            if (i.State == ItemState.Absent) return 0;      // 缺失置顶
+            if (i.State == ItemState.Unknown) return 2;     // 未判定垫底
+            return 1;                                       // 正常
+        }
+
+        /// <summary>忙碌时禁用按钮，并换成浅底深字的可读配色</summary>
+        private void EnterBusy(bool on)
+        {
+            _busy = on;
+            _btnScan.IsEnabled = !on;
+            _btnRepair.IsEnabled = !on;
+            PaintButton(_btnScan, false, on);
+            PaintButton(_btnRepair, true, on);
+        }
+
+        private static void PaintButton(Button b, bool primary, bool disabled)
+        {
+            if (disabled)
+            {
+                b.Background = new SolidColorBrush(Color.FromRgb(0xEC, 0xF1, 0xF9));
+                b.Foreground = new SolidColorBrush(Color.FromRgb(0x7E, 0x90, 0xA9));
+                b.BorderBrush = new SolidColorBrush(Color.FromRgb(0xD8, 0xE3, 0xF2));
+            }
+            else
+            {
+                b.Background = primary ? Theme.PrimarySoft : Brushes.White;
+                b.Foreground = primary ? Brushes.White : Theme.Primary;
+                b.BorderBrush = Theme.Primary;
+            }
+        }
+
         private void StyleButton(Button b, string text, bool primary, string glyph)
         {
             b.Height = 44;
@@ -779,10 +988,11 @@ namespace DllFix.Ui
             g.FontSize = 14;
             g.VerticalAlignment = VerticalAlignment.Center;
             g.Margin = new Thickness(0, 0, 8, 0);
-            g.Foreground = b.Foreground;
+            g.SetBinding(TextBlock.ForegroundProperty, new Binding("Foreground") { Source = b });
             TextBlock t = new TextBlock();
             t.Text = text;
             t.VerticalAlignment = VerticalAlignment.Center;
+            t.SetBinding(TextBlock.ForegroundProperty, new Binding("Foreground") { Source = b });
             sp.Children.Add(g);
             sp.Children.Add(t);
             b.Content = sp;
@@ -908,13 +1118,14 @@ namespace DllFix.Ui
         {
             Border card = new Border();
             card.Margin = new Thickness(0, 14, 0, 0);
-            card.CornerRadius = new CornerRadius(14);
+            card.CornerRadius = new CornerRadius(16);
             card.Background = new SolidColorBrush(Color.FromRgb(0x0F, 0x1B, 0x2D));
-            card.Padding = new Thickness(18, 12, 18, 12);
-            card.Height = 176;
+            card.Padding = new Thickness(16, 10, 16, 10);
+            card.Height = 46;                     // 默认收起：一行高度
+            _logCard = card;
 
             Grid g = new Grid();
-            g.RowDefinitions.Add(new RowDefinition { Height = new GridLength(26) });
+            g.RowDefinitions.Add(new RowDefinition { Height = new GridLength(24) });
             g.RowDefinitions.Add(new RowDefinition());
 
             Grid hd = new Grid();
@@ -932,25 +1143,51 @@ namespace DllFix.Ui
             gl.Margin = new Thickness(0, 0, 8, 0);
             TextBlock ht = new TextBlock();
             ht.Text = "执行日志";
-            ht.FontSize = 13;
+            ht.FontSize = 12.5;
             ht.Foreground = new SolidColorBrush(Color.FromRgb(0xC9, 0xD8, 0xEA));
             ht.VerticalAlignment = VerticalAlignment.Center;
             hl.Children.Add(gl);
             hl.Children.Add(ht);
             hd.Children.Add(hl);
 
+            // 收起时显示最近一条日志
+            _logLast.Text = "";
+            _logLast.FontFamily = new FontFamily("Consolas");
+            _logLast.FontSize = 11.5;
+            _logLast.Foreground = new SolidColorBrush(Color.FromRgb(0x9F, 0xB3, 0xCB));
+            _logLast.VerticalAlignment = VerticalAlignment.Center;
+            _logLast.Margin = new Thickness(14, 0, 8, 0);
+            _logLast.TextTrimming = TextTrimming.CharacterEllipsis;
+            Grid.SetColumn(_logLast, 1);
+            hd.Children.Add(_logLast);
+
+            StackPanel hr = new StackPanel { Orientation = Orientation.Horizontal, VerticalAlignment = VerticalAlignment.Center };
+            _logToggle.Content = "展开";
+            _logToggle.FontSize = 11.5;
+            _logToggle.Foreground = new SolidColorBrush(Color.FromRgb(0xB9, 0xC8, 0xDA));
+            _logToggle.Background = new SolidColorBrush(Color.FromArgb(0x22, 0xFF, 0xFF, 0xFF));
+            _logToggle.BorderBrush = new SolidColorBrush(Color.FromArgb(0x33, 0xFF, 0xFF, 0xFF));
+            _logToggle.BorderThickness = new Thickness(1);
+            _logToggle.Padding = new Thickness(12, 3, 12, 3);
+            _logToggle.Cursor = System.Windows.Input.Cursors.Hand;
+            _logToggle.Click += delegate { ToggleLog(); };
+            hr.Children.Add(_logToggle);
+
             Button clear = new Button();
             clear.Content = "清空";
             clear.FontSize = 11.5;
+            clear.Margin = new Thickness(8, 0, 0, 0);
             clear.Foreground = new SolidColorBrush(Color.FromRgb(0xB9, 0xC8, 0xDA));
             clear.Background = new SolidColorBrush(Color.FromArgb(0x22, 0xFF, 0xFF, 0xFF));
             clear.BorderBrush = new SolidColorBrush(Color.FromArgb(0x33, 0xFF, 0xFF, 0xFF));
             clear.BorderThickness = new Thickness(1);
             clear.Padding = new Thickness(12, 3, 12, 3);
             clear.Cursor = System.Windows.Input.Cursors.Hand;
-            clear.Click += delegate { _logBox.Clear(); };
-            Grid.SetColumn(clear, 2);
-            hd.Children.Add(clear);
+            clear.Click += delegate { _logBox.Clear(); _logLast.Text = ""; };
+            hr.Children.Add(clear);
+
+            Grid.SetColumn(hr, 2);
+            hd.Children.Add(hr);
             g.Children.Add(hd);
 
             _logBox.Background = Brushes.Transparent;
@@ -962,11 +1199,23 @@ namespace DllFix.Ui
             _logBox.VerticalScrollBarVisibility = ScrollBarVisibility.Auto;
             _logBox.Margin = new Thickness(0, 6, 0, 0);
             _logBox.Resources.Add(typeof(ScrollBar), BuildScrollBarStyle(true));
+            _logBox.Visibility = Visibility.Collapsed;   // 默认收起
             Grid.SetRow(_logBox, 1);
             g.Children.Add(_logBox);
 
             card.Child = g;
             return card;
+        }
+
+        /// <summary>展开 / 收起执行日志</summary>
+        private void ToggleLog()
+        {
+            _logExpanded = !_logExpanded;
+            _logCard.Height = _logExpanded ? 176 : 46;
+            _logBox.Visibility = _logExpanded ? Visibility.Visible : Visibility.Collapsed;
+            _logLast.Visibility = _logExpanded ? Visibility.Collapsed : Visibility.Visible;
+            _logToggle.Content = _logExpanded ? "收起" : "展开";
+            if (_logExpanded) _logBox.ScrollToEnd();
         }
 
         // ── 扫描 ────────────────────────────────────────────────────────────
@@ -1035,9 +1284,8 @@ namespace DllFix.Ui
                     int absentFinal = absent;
                     Dispatcher.BeginInvoke(new Action(delegate
                     {
-                        _busy = false;
-                        _btnScan.IsEnabled = true;
-                        _btnRepair.IsEnabled = true;
+                        EnterBusy(false);
+                        ApplySort();
                         UpdateCards();
                         Report(string.Format("扫描完成：共 {0} 项，缺失/待修复 {1} 项", totalItems, absentFinal), 100, false);
                     }));
@@ -1047,9 +1295,8 @@ namespace DllFix.Ui
                     Log.Error("scan failed", ex);
                     Dispatcher.BeginInvoke(new Action(delegate
                     {
-                        _busy = false;
-                        _btnScan.IsEnabled = true;
-                        _btnRepair.IsEnabled = true;
+                        EnterBusy(false);
+                        ApplySort();
                         Report("扫描失败：" + ex.Message, 0, false);
                     }));
                 }
@@ -1116,9 +1363,7 @@ namespace DllFix.Ui
                 if (picked.Count == 0) return;
             }
 
-            _busy = true;
-            _btnScan.IsEnabled = false;
-            _btnRepair.IsEnabled = false;
+            EnterBusy(true);
             _cts = new CancellationTokenSource();
 
             RepairEngine engine = new RepairEngine();
@@ -1149,9 +1394,8 @@ namespace DllFix.Ui
                     engine.Run(picked, token);
                     Dispatcher.BeginInvoke(new Action(delegate
                     {
-                        _busy = false;
-                        _btnScan.IsEnabled = true;
-                        _btnRepair.IsEnabled = true;
+                        EnterBusy(false);
+                        ApplySort();
                         UpdateCards();
                         Report(string.Format("完成：成功 {0}，失败 {1}", engine.Success, engine.Failed), 100, false);
                     }));
@@ -1161,9 +1405,8 @@ namespace DllFix.Ui
                     Log.Error("repair thread crashed", ex);
                     Dispatcher.BeginInvoke(new Action(delegate
                     {
-                        _busy = false;
-                        _btnScan.IsEnabled = true;
-                        _btnRepair.IsEnabled = true;
+                        EnterBusy(false);
+                        ApplySort();
                         Report("修复异常：" + ex.Message, 0, false);
                     }));
                 }
@@ -1192,6 +1435,7 @@ namespace DllFix.Ui
 
         private void OnLogLine(string line)
         {
+            if (line != null) _logLast.Text = line.Trim();
             Dispatcher.BeginInvoke(new Action(delegate
             {
                 _logBox.AppendText(line + Environment.NewLine);
