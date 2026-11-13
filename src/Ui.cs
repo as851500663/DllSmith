@@ -1,0 +1,1163 @@
+// ============================================================================
+//  4DDiG DLL Fixer — 重建工程（开源版 UI）
+//  文件：Ui.cs
+//  设计要点：去掉专业版/管理员/模拟模式等商业元素；表格改为
+//            组件 / 架构 / 版本 / 状态 四列；加大留白与层级，主视觉更开阔。
+//  约束：C# 5（csc 4.8），纯代码建 UI
+// ============================================================================
+
+using System;
+using System.Collections.Generic;
+using System.Collections.ObjectModel;
+using System.Linq;
+using System.Threading;
+using System.Windows;
+using System.Windows.Controls;
+using System.Windows.Controls.Primitives;
+using System.Windows.Markup;
+using System.Windows.Media;
+using DllFix.Core;
+
+namespace DllFix.Ui
+{
+    internal static class Theme
+    {
+        public static readonly Brush PageBg = Grad(Color.FromRgb(0xF3, 0xF7, 0xFE), Color.FromRgb(0xE9, 0xF1, 0xFC));
+        public static readonly Brush Card = Brushes.White;
+        public static readonly Brush CardLine = new SolidColorBrush(Color.FromRgb(0xE2, 0xEA, 0xF7));
+        public static readonly Brush Primary = new SolidColorBrush(Color.FromRgb(0x1F, 0x6F, 0xE0));
+        public static readonly Brush PrimarySoft = Grad(Color.FromRgb(0x3B, 0x8A, 0xF7), Color.FromRgb(0x1B, 0x62, 0xD6));
+        public static readonly Brush TextStrong = new SolidColorBrush(Color.FromRgb(0x10, 0x22, 0x3A));
+        public static readonly Brush TextBody = new SolidColorBrush(Color.FromRgb(0x33, 0x46, 0x5C));
+        public static readonly Brush TextMuted = new SolidColorBrush(Color.FromRgb(0x6E, 0x80, 0x98));
+        public static readonly Brush Ok = new SolidColorBrush(Color.FromRgb(0x18, 0x96, 0x52));
+        public static readonly Brush OkBg = new SolidColorBrush(Color.FromRgb(0xE9, 0xF8, 0xF0));
+        public static readonly Brush Warn = new SolidColorBrush(Color.FromRgb(0xD1, 0x3B, 0x3B));
+        public static readonly Brush WarnBg = new SolidColorBrush(Color.FromRgb(0xFD, 0xEC, 0xEC));
+        public static readonly Brush ArchBg = new SolidColorBrush(Color.FromRgb(0xEC, 0xF3, 0xFF));
+        public static readonly Brush ArchFg = new SolidColorBrush(Color.FromRgb(0x2A, 0x6C, 0xD8));
+
+        public static Brush Grad(Color a, Color b)
+        {
+            LinearGradientBrush g = new LinearGradientBrush();
+            g.StartPoint = new System.Windows.Point(0, 0);
+            g.EndPoint = new System.Windows.Point(1, 1);
+            g.GradientStops.Add(new GradientStop(a, 0));
+            g.GradientStops.Add(new GradientStop(b, 1));
+            return g;
+        }
+    }
+
+    public class MainWindow : Window
+    {
+        private readonly ContentControl _host = new ContentControl();
+        private readonly TextBlock _status = new TextBlock();
+        private readonly TextBlock _percent = new TextBlock();
+        private readonly ProgressBar _bar = new ProgressBar();
+        private readonly List<Button> _navItems = new List<Button>();
+        private readonly List<TextBlock> _navLabels = new List<TextBlock>();
+
+        public MainWindow()
+        {
+            Title = AppInfo.ProductName + " · " + AppInfo.ChineseName + "  v" + AppInfo.Version;
+            Width = 1220;
+            Height = 820;
+            MinWidth = 1080;
+            MinHeight = 700;
+            WindowStartupLocation = WindowStartupLocation.CenterScreen;
+            Background = Theme.PageBg;
+            FontFamily = new FontFamily("Microsoft YaHei UI");
+            FontSize = 13;
+            UseLayoutRounding = true;
+
+            BuildLayout();
+            ApplyIcon();
+            ShowPage(0);
+            CheckUpdateAsync();
+            StartHeartbeat();
+        }
+
+        // ── 窗口/任务栏图标（取自 exe 的 win32 图标资源） ───────────────────
+        private void ApplyIcon()
+        {
+            try
+            {
+                string exe = System.Reflection.Assembly.GetEntryAssembly().Location;
+                using (System.Drawing.Icon ico = System.Drawing.Icon.ExtractAssociatedIcon(exe))
+                {
+                    if (ico != null)
+                    {
+                        Icon = System.Windows.Interop.Imaging.CreateBitmapSourceFromHIcon(
+                            ico.Handle, new Int32Rect(0, 0, ico.Width, ico.Height),
+                            System.Windows.Media.Imaging.BitmapSizeOptions.FromEmptyOptions());
+                    }
+                }
+            }
+            catch (Exception ex) { Log.Error("icon load failed", ex); }
+        }
+
+        // ── 在线心跳（每 60s 上报一次，仅用于在线设备统计） ─────────────────
+        private void StartHeartbeat()
+        {
+            Thread t = new Thread(delegate()
+            {
+                while (true)
+                {
+                    try { ApiClient.Ping(); } catch { }
+                    Thread.Sleep(60000);
+                }
+            });
+            t.IsBackground = true;
+            t.Start();
+        }
+
+        // ── 启动时检查更新（目录服务 /api/v1/update） ────────────────────────
+        private void CheckUpdateAsync()
+        {
+            Loaded += delegate
+            {
+                Thread t = new Thread(delegate()
+                {
+                    UpdateInfo info = UpdateService.Check(AppInfo.Version);
+                    if (info == null) return;
+                    Dispatcher.BeginInvoke(new Action(delegate { PromptUpdate(info); }));
+                });
+                t.IsBackground = true;
+                t.Start();
+            };
+        }
+
+        private void PromptUpdate(UpdateInfo info)
+        {
+            string notes = string.IsNullOrEmpty(info.Notes) ? "（无更新说明）" : info.Notes;
+
+            // 强制更新：没有"跳过"，只能更新或退出
+            MessageBox.Show("检测到新版本 " + info.Version + "，当前版本 v" + AppInfo.Version
+                + " 已停止支持。\n\n" + notes + "\n\n点击「确定」开始更新，更新过程中请勿关闭程序。",
+                "需要更新", MessageBoxButton.OK, MessageBoxImage.Warning);
+
+            if (UpdateService.DownloadAndRun(info))
+            {
+                Application.Current.Shutdown();
+                return;
+            }
+
+            MessageBox.Show("更新包下载或 SHA256 校验失败，请联系管理员（详情见 Logs）。", "更新失败",
+                MessageBoxButton.OK, MessageBoxImage.Error);
+            Application.Current.Shutdown();
+        }
+
+        private void ApplyUpdate(UpdateInfo info)
+        {
+            if (!UpdateService.DownloadAndRun(info))
+            {
+                MessageBox.Show("更新包下载或 SHA256 校验失败，详情见 Logs。", "更新失败",
+                    MessageBoxButton.OK, MessageBoxImage.Error);
+                return;
+            }
+            Application.Current.Shutdown();
+        }
+
+        private void BuildLayout()
+        {
+            Grid root = new Grid();
+            root.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
+            root.RowDefinitions.Add(new RowDefinition());
+            root.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
+            root.Background = Theme.PageBg;
+            root.Children.Add(BuildBanner());
+
+            Grid body = new Grid();
+            body.Margin = new Thickness(20, 16, 20, 0);
+            body.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(224) });
+            body.ColumnDefinitions.Add(new ColumnDefinition());
+            body.Children.Add(BuildNav());
+            _host.Margin = new Thickness(16, 0, 0, 0);
+            Grid.SetColumn(_host, 1);
+            body.Children.Add(_host);
+            Grid.SetRow(body, 1);
+            root.Children.Add(body);
+
+            root.Children.Add(BuildFooter());
+            Grid.SetRow(root.Children[2], 2);
+            Content = root;
+        }
+
+        // ── 顶部主视觉 ──────────────────────────────────────────────────────
+        private UIElement BuildBanner()
+        {
+            Border banner = new Border();
+            banner.Margin = new Thickness(20, 20, 20, 0);
+            banner.CornerRadius = new CornerRadius(20);
+            banner.Background = Theme.Grad(Color.FromRgb(0xE7, 0xF1, 0xFF), Color.FromRgb(0xF6, 0xFA, 0xFF));
+            banner.BorderBrush = new SolidColorBrush(Color.FromRgb(0xDD, 0xE9, 0xFA));
+            banner.BorderThickness = new Thickness(1);
+            banner.Padding = new Thickness(26, 22, 26, 22);
+
+            Grid g = new Grid();
+            g.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+            g.ColumnDefinitions.Add(new ColumnDefinition());
+            g.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+
+            StackPanel left = new StackPanel { Orientation = Orientation.Horizontal, VerticalAlignment = VerticalAlignment.Center };
+            Border logo = new Border();
+            logo.Width = 60;
+            logo.Height = 60;
+            logo.CornerRadius = new CornerRadius(16);
+            logo.Background = Theme.PrimarySoft;
+            TextBlock glyph = new TextBlock();
+            glyph.Text = "DS";
+            glyph.FontFamily = new FontFamily("Segoe UI Semibold");
+            glyph.FontWeight = FontWeights.Bold;
+            glyph.FontSize = 22;
+            glyph.Foreground = Brushes.White;
+            glyph.HorizontalAlignment = HorizontalAlignment.Center;
+            glyph.VerticalAlignment = VerticalAlignment.Center;
+            logo.Child = glyph;
+
+            StackPanel name = new StackPanel { Margin = new Thickness(16, 0, 0, 0), VerticalAlignment = VerticalAlignment.Center };
+            TextBlock t1 = new TextBlock();
+            t1.Text = AppInfo.ProductName + "  ·  " + AppInfo.ChineseName;
+            t1.FontSize = 24;
+            t1.FontWeight = FontWeights.Bold;
+            t1.Foreground = Theme.TextStrong;
+            TextBlock t2 = new TextBlock();
+            t2.Text = AppInfo.Tagline;
+            t2.FontSize = 12.5;
+            t2.Foreground = Theme.TextMuted;
+            t2.Margin = new Thickness(0, 4, 0, 0);
+            name.Children.Add(t1);
+            name.Children.Add(t2);
+            left.Children.Add(logo);
+            left.Children.Add(name);
+            g.Children.Add(left);
+
+            StackPanel mid = new StackPanel { Margin = new Thickness(48, 0, 20, 0), VerticalAlignment = VerticalAlignment.Center };
+            TextBlock h = new TextBlock();
+            h.Text = "电脑系统修复与 DLL 修复工具";
+            h.FontSize = 27;
+            h.FontWeight = FontWeights.Bold;
+            h.Foreground = Theme.TextStrong;
+            TextBlock d = new TextBlock();
+            d.Text = "一键检测并修复系统运行库、DirectX、系统 DLL 等常见问题，\n让电脑运行更稳定、更流畅。";
+            d.FontSize = 13;
+            d.Foreground = Theme.TextMuted;
+            d.Margin = new Thickness(0, 8, 0, 0);
+            d.TextWrapping = TextWrapping.Wrap;
+            d.LineHeight = 20;
+            mid.Children.Add(h);
+            mid.Children.Add(d);
+            Grid.SetColumn(mid, 1);
+            g.Children.Add(mid);
+
+            // 右侧只保留项目信息（开源版：无商业化元素）
+            StackPanel right = new StackPanel { VerticalAlignment = VerticalAlignment.Center, HorizontalAlignment = HorizontalAlignment.Right };
+            TextBlock ver = new TextBlock();
+            ver.Text = "v" + AppInfo.Version + " · " + AppInfo.License;
+            ver.FontSize = 12.5;
+            ver.Foreground = Theme.TextMuted;
+            ver.HorizontalAlignment = HorizontalAlignment.Right;
+            TextBlock repo = new TextBlock();
+            repo.Text = "开源 · 目录可自建";
+            repo.FontSize = 12;
+            repo.Foreground = new SolidColorBrush(Color.FromRgb(0x8B, 0x9B, 0xB0));
+            repo.Margin = new Thickness(0, 6, 0, 0);
+            repo.HorizontalAlignment = HorizontalAlignment.Right;
+            right.Children.Add(ver);
+            right.Children.Add(repo);
+            Grid.SetColumn(right, 2);
+            g.Children.Add(right);
+
+            banner.Child = g;
+            return banner;
+        }
+
+        // ── 左侧导航 ───────────────────────────────────────────────────────
+        private UIElement BuildNav()
+        {
+            Border card = new Border();
+            card.Background = Theme.Card;
+            card.CornerRadius = new CornerRadius(18);
+            card.BorderBrush = Theme.CardLine;
+            card.BorderThickness = new Thickness(1);
+            card.Padding = new Thickness(12, 16, 12, 16);
+
+            StackPanel sp = new StackPanel();
+            string[] labels = { "全面体检", "运行库修复", "DirectX 修复", "系统 DLL 修复", "系统文件下载" };
+            string[] glyphs = { "\uE80F", "\uE74C", "\uE7FC", "\uE8A5", "\uE896" };
+
+            for (int i = 0; i < labels.Length; i++)
+            {
+                Button item = new Button();
+                item.Height = 48;
+                item.Margin = new Thickness(0, 0, 0, 6);
+                item.Background = Brushes.Transparent;
+                item.BorderThickness = new Thickness(0);
+                item.HorizontalContentAlignment = HorizontalAlignment.Stretch;
+                item.Padding = new Thickness(0);
+                item.Cursor = System.Windows.Input.Cursors.Hand;
+                item.Tag = i;
+
+                Grid ig = new Grid();
+                ig.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(44) });
+                ig.ColumnDefinitions.Add(new ColumnDefinition());
+
+                TextBlock gl = new TextBlock();
+                gl.Text = glyphs[i];
+                gl.FontFamily = new FontFamily("Segoe MDL2 Assets");
+                gl.FontSize = 17;
+                gl.HorizontalAlignment = HorizontalAlignment.Center;
+                gl.VerticalAlignment = VerticalAlignment.Center;
+                gl.Foreground = Theme.TextMuted;
+                ig.Children.Add(gl);
+
+                TextBlock lb = new TextBlock();
+                lb.Text = labels[i];
+                lb.FontSize = 14;
+                lb.VerticalAlignment = VerticalAlignment.Center;
+                lb.Foreground = Theme.TextBody;
+                Grid.SetColumn(lb, 1);
+                ig.Children.Add(lb);
+
+                item.Content = ig;
+                _navItems.Add(item);
+                _navLabels.Add(lb);
+                item.Click += delegate(object s, RoutedEventArgs e)
+                {
+                    Button b = (Button)s;
+                    ShowPage((int)b.Tag);
+                };
+                sp.Children.Add(item);
+            }
+
+            card.Child = sp;
+            return card;
+        }
+
+        private void ShowPage(int index)
+        {
+            string[] glyphs = { "\uE80F", "\uE74C", "\uE7FC", "\uE8A5", "\uE896" };
+            for (int i = 0; i < _navItems.Count; i++)
+            {
+                bool active = i == index;
+                _navItems[i].Background = active ? Theme.PrimarySoft : Brushes.Transparent;
+                _navLabels[i].Foreground = active ? Brushes.White : Theme.TextBody;
+                _navLabels[i].FontWeight = active ? FontWeights.SemiBold : FontWeights.Normal;
+                TextBlock icon = (TextBlock)((Grid)_navItems[i].Content).Children[0];
+                icon.Foreground = active ? Brushes.White : Theme.TextMuted;
+            }
+
+            ScanPage page;
+            switch (index)
+            {
+                case 1:
+                    page = new ScanPage("运行库修复", glyphs[1],
+                        "检测并修复 Microsoft Visual C++ 运行库，解决程序无法启动、缺少 DLL 等问题。",
+                        delegate
+                        {
+                            List<CatalogItem> l = Catalog.LoadRuntime("运行库", "VC_Scan", Environment.Is64BitOperatingSystem);
+                            l.AddRange(Catalog.LoadRuntime("运行库", "VC_DLL_Scan", Environment.Is64BitOperatingSystem));
+                            return l;
+                        }, false);
+                    break;
+                case 2:
+                    page = new ScanPage("DirectX 修复", glyphs[2],
+                        "修复 DirectX 组件缺失或损坏导致的游戏报错、画面异常问题。",
+                        delegate
+                        {
+                            List<CatalogItem> l = Catalog.LoadRuntime("DirectX", "DirectX", Environment.Is64BitOperatingSystem);
+                            l.AddRange(Catalog.LoadRuntime("DownLevel", "downlevel", Environment.Is64BitOperatingSystem));
+                            return l;
+                        }, false);
+                    break;
+                case 3:
+                    page = new ScanPage("系统 DLL 修复", glyphs[3],
+                        "解决运行游戏或打开应用时提示 DLL 文件缺失或损坏的问题。",
+                        delegate { return Catalog.LoadSystemDll(Environment.Is64BitOperatingSystem); }, false);
+                    break;
+                case 4:
+                    page = new ScanPage("系统文件下载", glyphs[4],
+                        "从镜像源下载系统文件与运行库安装包（仅下载，不安装）。",
+                        delegate { return Catalog.LoadSystemDll(Environment.Is64BitOperatingSystem); }, true);
+                    break;
+                default:
+                    page = new ScanPage("全面体检", glyphs[0],
+                        "一键检测运行库、DirectX、系统 DLL 的完整性与运行状态。",
+                        LoadAll, false);
+                    break;
+            }
+
+            page.StatusChanged += delegate(string s, int percent, bool busy)
+            {
+                _status.Text = s;
+                _bar.Value = percent;
+                _bar.IsIndeterminate = busy;
+                _percent.Text = percent + "%";
+            };
+            _host.Content = page;
+        }
+
+        private static List<CatalogItem> LoadAll()
+        {
+            List<CatalogItem> all = new List<CatalogItem>();
+            all.AddRange(Catalog.LoadSystemDll(Environment.Is64BitOperatingSystem));
+            all.AddRange(Catalog.LoadRuntime("运行库", "VC_Scan", Environment.Is64BitOperatingSystem));
+            all.AddRange(Catalog.LoadRuntime("运行库", "VC_DLL_Scan", Environment.Is64BitOperatingSystem));
+            all.AddRange(Catalog.LoadRuntime("DirectX", "DirectX", Environment.Is64BitOperatingSystem));
+            all.AddRange(Catalog.LoadRuntime("DownLevel", "downlevel", Environment.Is64BitOperatingSystem));
+            all.AddRange(Catalog.LoadRuntime("Network", "NETWORK", Environment.Is64BitOperatingSystem));
+            return all;
+        }
+
+        // ── 底部状态栏 ─────────────────────────────────────────────────────
+        private UIElement BuildFooter()
+        {
+            Border footer = new Border();
+            footer.Background = Brushes.White;
+            footer.BorderBrush = Theme.CardLine;
+            footer.BorderThickness = new Thickness(0, 1, 0, 0);
+            footer.Padding = new Thickness(24, 12, 24, 12);
+
+            Grid g = new Grid();
+            g.ColumnDefinitions.Add(new ColumnDefinition());
+            g.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(160) });
+            g.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(300) });
+
+            StackPanel left = new StackPanel { Orientation = Orientation.Horizontal, VerticalAlignment = VerticalAlignment.Center };
+            TextBlock info = new TextBlock();
+            info.Text = "\uE946";
+            info.FontFamily = new FontFamily("Segoe MDL2 Assets");
+            info.FontSize = 13;
+            info.Foreground = Theme.Primary;
+            info.Margin = new Thickness(0, 0, 8, 0);
+            _status.Text = "就绪";
+            _status.FontSize = 13;
+            _status.Foreground = Theme.TextBody;
+            _status.VerticalAlignment = VerticalAlignment.Center;
+            left.Children.Add(info);
+            left.Children.Add(_status);
+            g.Children.Add(left);
+
+            _percent.Text = "0%";
+            _percent.FontSize = 13;
+            _percent.Foreground = Theme.TextMuted;
+            _percent.HorizontalAlignment = HorizontalAlignment.Right;
+            _percent.VerticalAlignment = VerticalAlignment.Center;
+            Grid.SetColumn(_percent, 1);
+            g.Children.Add(_percent);
+
+            _bar.Height = 8;
+            _bar.Minimum = 0;
+            _bar.Maximum = 100;
+            _bar.Value = 0;
+            _bar.Foreground = new SolidColorBrush(Color.FromRgb(0x3A, 0xC4, 0x5A));
+            _bar.Background = new SolidColorBrush(Color.FromRgb(0xE6, 0xEC, 0xF6));
+            _bar.BorderThickness = new Thickness(0);
+            _bar.VerticalAlignment = VerticalAlignment.Center;
+            Grid.SetColumn(_bar, 2);
+            g.Children.Add(_bar);
+
+            footer.Child = g;
+            return footer;
+        }
+    }
+
+    public static class RepairEngineHolder
+    {
+        public static bool DryRun { get; set; }
+    }
+
+    // ── 扫描 / 修复页 ───────────────────────────────────────────────────────
+    public class ScanPage : UserControl
+    {
+        private readonly ObservableCollection<CatalogItem> _items = new ObservableCollection<CatalogItem>();
+        private readonly Func<List<CatalogItem>> _loader;
+        private readonly bool _downloadOnly;
+        private readonly string _title;
+
+        private readonly ListBox _list = new ListBox();
+        private readonly TextBox _logBox = new TextBox();
+        private readonly Button _btnScan = new Button();
+        private readonly Button _btnRepair = new Button();
+        private readonly Border _allCheck = new Border();
+        private readonly TextBlock _allCheckGlyph = new TextBlock();
+
+        private TextBlock _cardTotal;
+        private TextBlock _cardMissing;
+        private TextBlock _cardOk;
+
+        private CancellationTokenSource _cts;
+        private bool _busy;
+
+        public event Action<string, int, bool> StatusChanged;
+
+        public ScanPage(string title, string glyph, string desc, Func<List<CatalogItem>> loader, bool downloadOnly)
+        {
+            _title = title;
+            _loader = loader;
+            _downloadOnly = downloadOnly;
+
+            Build(title, glyph, desc);
+            Log.LineWritten += OnLogLine;
+            Loaded += delegate { BeginScan(); };
+            Unloaded += delegate { Log.LineWritten -= OnLogLine; };
+        }
+
+        private void Build(string title, string glyph, string desc)
+        {
+            Grid root = new Grid();
+            root.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
+            root.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
+            root.RowDefinitions.Add(new RowDefinition());
+            root.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
+
+            // 页头
+            StackPanel head = new StackPanel { Orientation = Orientation.Horizontal, Margin = new Thickness(2, 0, 0, 16) };
+            Border tile = new Border();
+            tile.Width = 50;
+            tile.Height = 50;
+            tile.CornerRadius = new CornerRadius(14);
+            tile.Background = new SolidColorBrush(Color.FromRgb(0xE9, 0xF2, 0xFF));
+            TextBlock tg = new TextBlock();
+            tg.Text = glyph;
+            tg.FontFamily = new FontFamily("Segoe MDL2 Assets");
+            tg.FontSize = 22;
+            tg.Foreground = Theme.Primary;
+            tg.HorizontalAlignment = HorizontalAlignment.Center;
+            tg.VerticalAlignment = VerticalAlignment.Center;
+            tile.Child = tg;
+
+            StackPanel ht = new StackPanel { Margin = new Thickness(14, 0, 0, 0), VerticalAlignment = VerticalAlignment.Center };
+            TextBlock h = new TextBlock();
+            h.Text = title;
+            h.FontSize = 23;
+            h.FontWeight = FontWeights.Bold;
+            h.Foreground = Theme.TextStrong;
+            TextBlock d = new TextBlock();
+            d.Text = desc;
+            d.FontSize = 12.5;
+            d.Foreground = Theme.TextMuted;
+            d.Margin = new Thickness(0, 5, 0, 0);
+            ht.Children.Add(h);
+            ht.Children.Add(d);
+            head.Children.Add(tile);
+            head.Children.Add(ht);
+            root.Children.Add(head);
+
+            // 统计卡 + 操作
+            Grid mid = new Grid();
+            mid.Margin = new Thickness(0, 0, 0, 14);
+            mid.ColumnDefinitions.Add(new ColumnDefinition());
+            mid.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+
+            Grid cards = new Grid();
+            for (int i = 0; i < 3; i++) cards.ColumnDefinitions.Add(new ColumnDefinition());
+            _cardTotal = new TextBlock();
+            _cardMissing = new TextBlock();
+            _cardOk = new TextBlock();
+            cards.Children.Add(StatCard(0, "\uE73E", Theme.Ok, Theme.OkBg, "检测完成", _cardTotal, "0 项"));
+            cards.Children.Add(StatCard(1, "\uE7BA", new SolidColorBrush(Color.FromRgb(0xEF, 0x8E, 0x1F)),
+                new SolidColorBrush(Color.FromRgb(0xFF, 0xF3, 0xE2)), "缺失 / 待修复", _cardMissing, "0 项"));
+            cards.Children.Add(StatCard(2, "\uE930", Theme.Ok, Theme.OkBg, "正常", _cardOk, "0 项"));
+            mid.Children.Add(cards);
+
+            StackPanel actions = new StackPanel { Orientation = Orientation.Horizontal, VerticalAlignment = VerticalAlignment.Center };
+            StyleButton(_btnScan, "重新扫描", false, "\uE72C");
+            _btnScan.Click += delegate { BeginScan(); };
+            StyleButton(_btnRepair, _downloadOnly ? "一键下载" : "一键修复", true, "\uE8B0");
+            _btnRepair.Click += delegate { BeginRepair(); };
+            actions.Children.Add(_btnScan);
+            actions.Children.Add(_btnRepair);
+            Grid.SetColumn(actions, 1);
+            mid.Children.Add(actions);
+            root.Children.Add(mid);
+            Grid.SetRow(mid, 1);
+
+            // 表格
+            Border tableCard = new Border();
+            tableCard.Background = Theme.Card;
+            tableCard.CornerRadius = new CornerRadius(18);
+            tableCard.BorderBrush = Theme.CardLine;
+            tableCard.BorderThickness = new Thickness(1);
+            tableCard.ClipToBounds = true;
+
+            Grid table = new Grid();
+            table.RowDefinitions.Add(new RowDefinition { Height = new GridLength(46) });
+            table.RowDefinitions.Add(new RowDefinition());
+
+            Grid header = new Grid();
+            header.Background = new SolidColorBrush(Color.FromRgb(0xF5, 0xF9, 0xFF));
+            BuildColumns(header);
+            AddCell(header, 0, AllCheckBox());
+            AddText(header, 1, _title == "系统 DLL 修复" || _title == "系统文件下载" ? "系统文件" : "运行库组件",
+                    12.5, Theme.TextBody, true, new Thickness(8, 0, 0, 0));
+            AddText(header, 2, "架构", 12.5, Theme.TextBody, true, new Thickness(8, 0, 0, 0));
+            AddText(header, 3, "版本", 12.5, Theme.TextBody, true, new Thickness(8, 0, 0, 0));
+            AddText(header, 4, "状态", 12.5, Theme.TextBody, true, new Thickness(8, 0, 0, 0));
+            table.Children.Add(header);
+
+            _list.ItemsSource = _items;
+            _list.BorderThickness = new Thickness(0);
+            _list.Background = Brushes.White;
+            _list.HorizontalContentAlignment = HorizontalAlignment.Stretch;
+            _list.ItemTemplate = BuildRowTemplate();
+            _list.ItemContainerStyle = BuildRowStyle();
+            _list.Resources.Add(typeof(ScrollBar), BuildScrollBarStyle(false));
+            Grid.SetRow(_list, 1);
+            table.Children.Add(_list);
+
+            tableCard.Child = table;
+            root.Children.Add(tableCard);
+            Grid.SetRow(tableCard, 2);
+
+            root.Children.Add(BuildLogPanel());
+            Grid.SetRow(root.Children[3], 3);
+
+            Content = root;
+        }
+
+        private UIElement AllCheckBox()
+        {
+            _allCheckGlyph.Text = "\uE73A";
+            _allCheckGlyph.FontFamily = new FontFamily("Segoe MDL2 Assets");
+            _allCheckGlyph.FontSize = 14;
+            _allCheckGlyph.Foreground = Theme.Primary;
+            _allCheckGlyph.HorizontalAlignment = HorizontalAlignment.Center;
+            _allCheckGlyph.VerticalAlignment = VerticalAlignment.Center;
+            _allCheck.Background = Brushes.Transparent;
+            _allCheck.Cursor = System.Windows.Input.Cursors.Hand;
+            _allCheck.Child = _allCheckGlyph;
+            _allCheck.MouseLeftButtonUp += delegate
+            {
+                bool selectAll = _items.Any(delegate(CatalogItem i) { return !i.Selected; });
+                foreach (CatalogItem i in _items) i.Selected = selectAll;
+                _allCheckGlyph.Text = selectAll ? "\uE73A" : "\uE739";
+            };
+            return _allCheck;
+        }
+
+        private static void BuildColumns(Grid g)
+        {
+            g.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(48) });
+            g.ColumnDefinitions.Add(new ColumnDefinition());
+            g.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(100) });
+            g.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(150) });
+            g.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(120) });
+        }
+
+        private static void AddCell(Grid g, int col, UIElement el)
+        {
+            Grid.SetColumn(el, col);
+            g.Children.Add(el);
+        }
+
+        private static void AddText(Grid g, int col, string text, double size, Brush fg, bool bold, Thickness margin)
+        {
+            TextBlock t = new TextBlock();
+            t.Text = text;
+            t.FontSize = size;
+            t.Foreground = fg;
+            t.FontWeight = bold ? FontWeights.SemiBold : FontWeights.Normal;
+            t.VerticalAlignment = VerticalAlignment.Center;
+            t.Margin = margin;
+            AddCell(g, col, t);
+        }
+
+        private UIElement StatCard(int col, string glyph, Brush fg, Brush bg, string label, TextBlock valueBlock, string init)
+        {
+            Border card = new Border();
+            card.Background = Theme.Card;
+            card.CornerRadius = new CornerRadius(14);
+            card.BorderBrush = Theme.CardLine;
+            card.BorderThickness = new Thickness(1);
+            card.Padding = new Thickness(20, 14, 20, 14);
+            card.Margin = new Thickness(col == 0 ? 0 : 10, 0, col == 2 ? 0 : 10, 0);
+
+            Grid g = new Grid();
+            g.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(46) });
+            g.ColumnDefinitions.Add(new ColumnDefinition());
+
+            Border icon = new Border();
+            icon.Width = 36;
+            icon.Height = 36;
+            icon.CornerRadius = new CornerRadius(18);
+            icon.Background = bg;
+            icon.VerticalAlignment = VerticalAlignment.Center;
+            TextBlock gl = new TextBlock();
+            gl.Text = glyph;
+            gl.FontFamily = new FontFamily("Segoe MDL2 Assets");
+            gl.FontSize = 16;
+            gl.Foreground = fg;
+            gl.HorizontalAlignment = HorizontalAlignment.Center;
+            gl.VerticalAlignment = VerticalAlignment.Center;
+            icon.Child = gl;
+            g.Children.Add(icon);
+
+            StackPanel sp = new StackPanel { Margin = new Thickness(12, 0, 0, 0), VerticalAlignment = VerticalAlignment.Center };
+            TextBlock lb = new TextBlock();
+            lb.Text = label;
+            lb.FontSize = 12;
+            lb.Foreground = Theme.TextMuted;
+            valueBlock.Text = init;
+            valueBlock.FontSize = 22;
+            valueBlock.FontWeight = FontWeights.Bold;
+            valueBlock.Foreground = Theme.TextStrong;
+            valueBlock.Margin = new Thickness(0, 3, 0, 0);
+            sp.Children.Add(lb);
+            sp.Children.Add(valueBlock);
+            Grid.SetColumn(sp, 1);
+            g.Children.Add(sp);
+
+            card.Child = g;
+            Grid.SetColumn(card, col);
+            return card;
+        }
+
+        private void StyleButton(Button b, string text, bool primary, string glyph)
+        {
+            b.Height = 44;
+            b.MinWidth = 132;
+            b.Margin = new Thickness(10, 0, 0, 0);
+            b.Padding = new Thickness(18, 0, 18, 0);
+            b.FontSize = 13.5;
+            b.FontWeight = FontWeights.SemiBold;
+            b.BorderThickness = new Thickness(primary ? 0 : 1);
+            b.BorderBrush = Theme.Primary;
+            b.Foreground = primary ? Brushes.White : Theme.Primary;
+            b.Background = primary ? Theme.PrimarySoft : Brushes.White;
+            b.Cursor = System.Windows.Input.Cursors.Hand;
+
+            StackPanel sp = new StackPanel { Orientation = Orientation.Horizontal, HorizontalAlignment = HorizontalAlignment.Center };
+            TextBlock g = new TextBlock();
+            g.Text = glyph;
+            g.FontFamily = new FontFamily("Segoe MDL2 Assets");
+            g.FontSize = 14;
+            g.VerticalAlignment = VerticalAlignment.Center;
+            g.Margin = new Thickness(0, 0, 8, 0);
+            g.Foreground = b.Foreground;
+            TextBlock t = new TextBlock();
+            t.Text = text;
+            t.VerticalAlignment = VerticalAlignment.Center;
+            sp.Children.Add(g);
+            sp.Children.Add(t);
+            b.Content = sp;
+        }
+
+        private Style BuildRowStyle()
+        {
+            Style s = new Style(typeof(ListBoxItem));
+            s.Setters.Add(new Setter(ListBoxItem.PaddingProperty, new Thickness(0)));
+            s.Setters.Add(new Setter(ListBoxItem.MarginProperty, new Thickness(0)));
+            s.Setters.Add(new Setter(ListBoxItem.HorizontalContentAlignmentProperty, HorizontalAlignment.Stretch));
+            s.Setters.Add(new Setter(ListBoxItem.BackgroundProperty, Brushes.White));
+            Trigger sel = new Trigger();
+            sel.Property = ListBoxItem.IsSelectedProperty;
+            sel.Value = true;
+            sel.Setters.Add(new Setter(ListBoxItem.BackgroundProperty, new SolidColorBrush(Color.FromRgb(0xF2, 0xF7, 0xFF))));
+            s.Triggers.Add(sel);
+            return s;
+        }
+
+        /// <summary>统一滚动条样式（细、圆角，贴合卡片风格）</summary>
+        private static Style BuildScrollBarStyle(bool dark)
+        {
+            string thumb = dark ? "#3C4B61" : "#C9D6E8";
+            string xaml =
+                "<Style xmlns='http://schemas.microsoft.com/winfx/2006/xaml/presentation'" +
+                "       xmlns:x='http://schemas.microsoft.com/winfx/2006/xaml' TargetType='ScrollBar'>" +
+                "  <Setter Property='Width' Value='9'/>" +
+                "  <Setter Property='Background' Value='Transparent'/>" +
+                "  <Setter Property='Template'>" +
+                "    <Setter.Value>" +
+                "      <ControlTemplate TargetType='ScrollBar'>" +
+                "        <Grid Background='Transparent'>" +
+                "          <Track x:Name='PART_Track' IsDirectionReversed='true'>" +
+                "            <Track.Thumb>" +
+                "              <Thumb>" +
+                "                <Thumb.Template>" +
+                "                  <ControlTemplate TargetType='Thumb'>" +
+                "                    <Border CornerRadius='5' Background='" + thumb + "' Margin='1,0'/>" +
+                "                  </ControlTemplate>" +
+                "                </Thumb.Template>" +
+                "              </Thumb>" +
+                "            </Track.Thumb>" +
+                "          </Track>" +
+                "        </Grid>" +
+                "      </ControlTemplate>" +
+                "    </Setter.Value>" +
+                "  </Setter>" +
+                "</Style>";
+            return (Style)XamlReader.Parse(xaml);
+        }
+
+        private DataTemplate BuildRowTemplate()
+        {
+            string xaml =
+                "<DataTemplate xmlns='http://schemas.microsoft.com/winfx/2006/xaml/presentation'>" +
+                "  <Border BorderBrush='#F0F4FA' BorderThickness='0,0,0,1' Padding='0,9'>" +
+                "    <Grid>" +
+                "      <Grid.ColumnDefinitions>" +
+                "        <ColumnDefinition Width='48'/>" +
+                "        <ColumnDefinition Width='*'/>" +
+                "        <ColumnDefinition Width='100'/>" +
+                "        <ColumnDefinition Width='150'/>" +
+                "        <ColumnDefinition Width='120'/>" +
+                "      </Grid.ColumnDefinitions>" +
+                "      <CheckBox IsChecked='{Binding Selected, Mode=TwoWay}' HorizontalAlignment='Center' VerticalAlignment='Center'/>" +
+                "      <StackPanel Grid.Column='1' Orientation='Horizontal' Margin='8,0,12,0'>" +
+                "        <TextBlock Text='&#xE74C;' FontFamily='Segoe MDL2 Assets' FontSize='15' Foreground='#7A4DFF' VerticalAlignment='Center' Margin='0,0,10,0'/>" +
+                "        <TextBlock Text='{Binding Name}' FontSize='13.5' Foreground='#1B2B42' VerticalAlignment='Center' TextTrimming='CharacterEllipsis'/>" +
+                "      </StackPanel>" +
+                "      <Border Grid.Column='2' HorizontalAlignment='Left' VerticalAlignment='Center' CornerRadius='9' Padding='9,2'" +
+                "              Background='#ECF3FF' BorderBrush='#D8E7FF' BorderThickness='1'>" +
+                "        <TextBlock Text='{Binding Arch}' FontSize='11.5' Foreground='#2A6CD8'/>" +
+                "      </Border>" +
+                "      <TextBlock Grid.Column='3' Text='{Binding Version}' FontFamily='Consolas' FontSize='12.5'" +
+                "                 Foreground='#5A6B80' VerticalAlignment='Center' Margin='8,0,0,0'/>" +
+                "      <Border Grid.Column='4' HorizontalAlignment='Left' VerticalAlignment='Center' CornerRadius='10' Padding='11,3'" +
+                "              Background='#E9F8F0' BorderBrush='#CFEBD9' BorderThickness='1'>" +
+                "        <Border.Style>" +
+                "          <Style TargetType='Border'>" +
+                "            <Style.Triggers>" +
+                "              <DataTrigger Binding='{Binding IsMissing}' Value='True'>" +
+                "                <Setter Property='Background' Value='#FDECEC'/>" +
+                "                <Setter Property='BorderBrush' Value='#F5C7C7'/>" +
+                "              </DataTrigger>" +
+                "              <DataTrigger Binding='{Binding StateText}' Value='下载中'>" +
+                "                <Setter Property='Background' Value='#FFF3E2'/>" +
+                "                <Setter Property='BorderBrush' Value='#F7DCB5'/>" +
+                "              </DataTrigger>" +
+                "              <DataTrigger Binding='{Binding StateText}' Value='安装中'>" +
+                "                <Setter Property='Background' Value='#FFF3E2'/>" +
+                "                <Setter Property='BorderBrush' Value='#F7DCB5'/>" +
+                "              </DataTrigger>" +
+                "            </Style.Triggers>" +
+                "          </Style>" +
+                "        </Border.Style>" +
+                "        <TextBlock Text='{Binding StateText}' FontSize='12'>" +
+                "          <TextBlock.Style>" +
+                "            <Style TargetType='TextBlock'>" +
+                "              <Setter Property='Foreground' Value='#189652'/>" +
+                "              <Style.Triggers>" +
+                "                <DataTrigger Binding='{Binding IsMissing}' Value='True'>" +
+                "                  <Setter Property='Foreground' Value='#D13B3B'/>" +
+                "                </DataTrigger>" +
+                "                <DataTrigger Binding='{Binding StateText}' Value='下载中'>" +
+                "                  <Setter Property='Foreground' Value='#B26A00'/>" +
+                "                </DataTrigger>" +
+                "                <DataTrigger Binding='{Binding StateText}' Value='安装中'>" +
+                "                  <Setter Property='Foreground' Value='#B26A00'/>" +
+                "                </DataTrigger>" +
+                "              </Style.Triggers>" +
+                "            </Style>" +
+                "          </TextBlock.Style>" +
+                "        </TextBlock>" +
+                "      </Border>" +
+                "    </Grid>" +
+                "  </Border>" +
+                "</DataTemplate>";
+            return (DataTemplate)XamlReader.Parse(xaml);
+        }
+
+        private UIElement BuildLogPanel()
+        {
+            Border card = new Border();
+            card.Margin = new Thickness(0, 14, 0, 0);
+            card.CornerRadius = new CornerRadius(14);
+            card.Background = new SolidColorBrush(Color.FromRgb(0x0F, 0x1B, 0x2D));
+            card.Padding = new Thickness(18, 12, 18, 12);
+            card.Height = 176;
+
+            Grid g = new Grid();
+            g.RowDefinitions.Add(new RowDefinition { Height = new GridLength(26) });
+            g.RowDefinitions.Add(new RowDefinition());
+
+            Grid hd = new Grid();
+            hd.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+            hd.ColumnDefinitions.Add(new ColumnDefinition());
+            hd.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+
+            StackPanel hl = new StackPanel { Orientation = Orientation.Horizontal, VerticalAlignment = VerticalAlignment.Center };
+            TextBlock gl = new TextBlock();
+            gl.Text = "\uE756";
+            gl.FontFamily = new FontFamily("Segoe MDL2 Assets");
+            gl.FontSize = 12;
+            gl.Foreground = new SolidColorBrush(Color.FromRgb(0x8F, 0xB4, 0xE8));
+            gl.VerticalAlignment = VerticalAlignment.Center;
+            gl.Margin = new Thickness(0, 0, 8, 0);
+            TextBlock ht = new TextBlock();
+            ht.Text = "执行日志";
+            ht.FontSize = 13;
+            ht.Foreground = new SolidColorBrush(Color.FromRgb(0xC9, 0xD8, 0xEA));
+            ht.VerticalAlignment = VerticalAlignment.Center;
+            hl.Children.Add(gl);
+            hl.Children.Add(ht);
+            hd.Children.Add(hl);
+
+            Button clear = new Button();
+            clear.Content = "清空";
+            clear.FontSize = 11.5;
+            clear.Foreground = new SolidColorBrush(Color.FromRgb(0xB9, 0xC8, 0xDA));
+            clear.Background = new SolidColorBrush(Color.FromArgb(0x22, 0xFF, 0xFF, 0xFF));
+            clear.BorderBrush = new SolidColorBrush(Color.FromArgb(0x33, 0xFF, 0xFF, 0xFF));
+            clear.BorderThickness = new Thickness(1);
+            clear.Padding = new Thickness(12, 3, 12, 3);
+            clear.Cursor = System.Windows.Input.Cursors.Hand;
+            clear.Click += delegate { _logBox.Clear(); };
+            Grid.SetColumn(clear, 2);
+            hd.Children.Add(clear);
+            g.Children.Add(hd);
+
+            _logBox.Background = Brushes.Transparent;
+            _logBox.Foreground = new SolidColorBrush(Color.FromRgb(0xB7, 0xC6, 0xDA));
+            _logBox.BorderThickness = new Thickness(0);
+            _logBox.FontFamily = new FontFamily("Consolas");
+            _logBox.FontSize = 11.5;
+            _logBox.IsReadOnly = true;
+            _logBox.VerticalScrollBarVisibility = ScrollBarVisibility.Auto;
+            _logBox.Margin = new Thickness(0, 6, 0, 0);
+            _logBox.Resources.Add(typeof(ScrollBar), BuildScrollBarStyle(true));
+            Grid.SetRow(_logBox, 1);
+            g.Children.Add(_logBox);
+
+            card.Child = g;
+            return card;
+        }
+
+        // ── 扫描 ────────────────────────────────────────────────────────────
+        private void BeginScan()
+        {
+            if (_busy) return;
+            _busy = true;
+            _items.Clear();
+            _btnScan.IsEnabled = false;
+            _btnRepair.IsEnabled = false;
+            Report("正在加载目录…", 0, true);
+
+            Thread t = new Thread(delegate()
+            {
+                bool wow64Off = false;
+                try
+                {
+                    wow64Off = Wow64.Disable();
+                    List<CatalogItem> raw = _loader();
+                    List<CatalogItem> dedup = new List<CatalogItem>();
+                    HashSet<string> seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+                    foreach (CatalogItem it in raw)
+                    {
+                        string key = it.Category + "|" + it.Title + "|" + (it.FilePath == null ? "" : it.FilePath);
+                        if (seen.Add(key)) dedup.Add(it);
+                    }
+
+                    Dispatcher.BeginInvoke(new Action(delegate
+                    {
+                        foreach (CatalogItem it in dedup) _items.Add(it);
+                        Report(string.Format("正在检测 {0} 个条目…", dedup.Count), 0, true);
+                    }));
+
+                    int done = 0, absent = 0;
+                    foreach (CatalogItem it in dedup)
+                    {
+                        bool miss = Scanner.IsAbsent(it);
+                        if (miss) absent++;
+                        CatalogItem capture = it;
+                        bool missCapture = miss;
+                        Dispatcher.BeginInvoke(new Action(delegate
+                        {
+                            capture.State = missCapture ? ItemState.Absent : ItemState.Present;
+                            capture.Detail = missCapture ? "缺失" : "已安装";
+                            if (capture.State == ItemState.Present && capture.Kind != ItemKind.SystemDll
+                                && (capture.Version == null || capture.Version == "—"))
+                            {
+                                string v = SystemProbe.FindInstalledVersion(
+                                    string.IsNullOrEmpty(capture.DisplayName) ? capture.DisplayVersion : capture.DisplayName);
+                                if (!string.IsNullOrEmpty(v)) capture.Version = v;
+                            }
+                        }));
+                        done++;
+                        if (done % 50 == 0)
+                        {
+                            int d = done, a = absent, total = dedup.Count;
+                            Dispatcher.BeginInvoke(new Action(delegate
+                            {
+                                Report(string.Format("检测中 {0}/{1}，缺失 {2}", d, total, a),
+                                       total == 0 ? 0 : d * 100 / total, false);
+                            }));
+                        }
+                    }
+
+                    int totalItems = dedup.Count;
+                    int absentFinal = absent;
+                    Dispatcher.BeginInvoke(new Action(delegate
+                    {
+                        _busy = false;
+                        _btnScan.IsEnabled = true;
+                        _btnRepair.IsEnabled = true;
+                        UpdateCards();
+                        Report(string.Format("扫描完成：共 {0} 项，缺失/待修复 {1} 项", totalItems, absentFinal), 100, false);
+                    }));
+                }
+                catch (Exception ex)
+                {
+                    Log.Error("scan failed", ex);
+                    Dispatcher.BeginInvoke(new Action(delegate
+                    {
+                        _busy = false;
+                        _btnScan.IsEnabled = true;
+                        _btnRepair.IsEnabled = true;
+                        Report("扫描失败：" + ex.Message, 0, false);
+                    }));
+                }
+                finally
+                {
+                    if (wow64Off) Wow64.Enable();
+                }
+            });
+            t.IsBackground = true;
+            t.SetApartmentState(ApartmentState.STA);
+            t.Start();
+        }
+
+        private void UpdateCards()
+        {
+            int total = _items.Count;
+            int missing = _items.Count(delegate(CatalogItem i) { return i.State == ItemState.Absent; });
+            if (_cardTotal != null) _cardTotal.Text = total + " 项";
+            if (_cardMissing != null) _cardMissing.Text = missing + " 项";
+            if (_cardOk != null) _cardOk.Text = (total - missing) + " 项";
+        }
+
+        // ── 修复 / 下载 ─────────────────────────────────────────────────────
+        private void BeginRepair()
+        {
+            if (_busy) return;
+
+            if (_busy)
+            {
+                MessageBox.Show("正在检测或处理中，请稍候…", "提示");
+                return;
+            }
+
+            // 只修复"确认为缺失"的项：正常(Present)、已修复(Done)、未检测(Unknown) 一律不动
+            List<CatalogItem> picked = _items.Where(delegate(CatalogItem i)
+            {
+                return i.Selected && i.State == ItemState.Absent;
+            }).ToList();
+
+            if (picked.Count == 0)
+            {
+                MessageBox.Show("没有需要修复的项：当前扫描结果里没有标记为「缺失」的组件。", "提示");
+                return;
+            }
+
+            int normalCount = _items.Count(delegate(CatalogItem i) { return i.State == ItemState.Present; });
+            MessageBoxResult confirm = MessageBox.Show(
+                string.Format("将修复 {0} 项缺失组件，自动跳过 {1} 项正常组件。\n\n继续？", picked.Count, normalCount),
+                "确认修复", MessageBoxButton.YesNo, MessageBoxImage.Question);
+            if (confirm != MessageBoxResult.Yes) return;
+
+            if (!RepairEngineHolder.DryRun && !SystemProbe.IsElevated && picked.Any(delegate(CatalogItem i)
+                { return i.Kind == ItemKind.SystemDll; }))
+            {
+                MessageBoxResult r = MessageBox.Show(
+                    "覆盖系统目录文件需要管理员权限。\n\n是 = 以管理员身份重新启动\n否 = 只处理不需要提权的项",
+                    "需要管理员权限", MessageBoxButton.YesNo, MessageBoxImage.Warning);
+                if (r == MessageBoxResult.Yes)
+                {
+                    RelaunchElevated();
+                    return;
+                }
+                picked = picked.Where(delegate(CatalogItem i) { return i.Kind != ItemKind.SystemDll; }).ToList();
+                if (picked.Count == 0) return;
+            }
+
+            _busy = true;
+            _btnScan.IsEnabled = false;
+            _btnRepair.IsEnabled = false;
+            _cts = new CancellationTokenSource();
+
+            RepairEngine engine = new RepairEngine();
+            engine.DryRun = RepairEngineHolder.DryRun;
+            engine.DownloadOnly = _downloadOnly;
+
+            engine.Overall += delegate(int d, int total)
+            {
+                Dispatcher.BeginInvoke(new Action(delegate
+                {
+                    Report(string.Format("处理中 {0}/{1}", d, total),
+                           total == 0 ? 0 : d * 100 / total, false);
+                }));
+            };
+            engine.ItemProgress += delegate(CatalogItem item, int pct, string msg)
+            {
+                Dispatcher.BeginInvoke(new Action(delegate
+                {
+                    Report(string.Format("{0}：{1}", item.Title, msg), pct, false);
+                }));
+            };
+
+            CancellationToken token = _cts.Token;
+            Thread t = new Thread(delegate()
+            {
+                try
+                {
+                    engine.Run(picked, token);
+                    Dispatcher.BeginInvoke(new Action(delegate
+                    {
+                        _busy = false;
+                        _btnScan.IsEnabled = true;
+                        _btnRepair.IsEnabled = true;
+                        UpdateCards();
+                        Report(string.Format("完成：成功 {0}，失败 {1}", engine.Success, engine.Failed), 100, false);
+                    }));
+                }
+                catch (Exception ex)
+                {
+                    Log.Error("repair thread crashed", ex);
+                    Dispatcher.BeginInvoke(new Action(delegate
+                    {
+                        _busy = false;
+                        _btnScan.IsEnabled = true;
+                        _btnRepair.IsEnabled = true;
+                        Report("修复异常：" + ex.Message, 0, false);
+                    }));
+                }
+            });
+            t.IsBackground = true;
+            t.Start();
+        }
+
+        private void RelaunchElevated()
+        {
+            try
+            {
+                string exe = System.Reflection.Assembly.GetEntryAssembly().Location;
+                System.Diagnostics.ProcessStartInfo psi = new System.Diagnostics.ProcessStartInfo(exe);
+                psi.UseShellExecute = true;
+                psi.Verb = "runas";
+                System.Diagnostics.Process.Start(psi);
+                Application.Current.Shutdown();
+            }
+            catch (Exception ex)
+            {
+                Log.Error("elevate failed", ex);
+                MessageBox.Show("提权失败：" + ex.Message);
+            }
+        }
+
+        private void OnLogLine(string line)
+        {
+            Dispatcher.BeginInvoke(new Action(delegate
+            {
+                _logBox.AppendText(line + Environment.NewLine);
+                _logBox.ScrollToEnd();
+            }));
+        }
+
+        private void Report(string text, int percent, bool busy)
+        {
+            Action<string, int, bool> h = StatusChanged;
+            if (h != null) h(text, percent, busy);
+        }
+    }
+}

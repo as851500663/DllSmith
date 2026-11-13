@@ -1,0 +1,12 @@
+﻿DllSmith · DLL 修复匠
+开源运行库与 DLL 修复工具
+Copyright (C) 2026  DllSmith contributors
+
+本程序是自由软件，依据 GNU General Public License v3.0 发布；
+你可以再分发和/或修改它，但需保留同样的许可。
+
+本程序按"现状"提供，不附带任何担保。修复系统 DLL / 运行库会改动
+C:\Windows\System32 等目录，请在操作前自行备份重要数据。
+
+客户端默认连接目录服务获取修复清单与版本信息；
+若不需要联网，可将安装目录下 config.json 中的 server 置空。

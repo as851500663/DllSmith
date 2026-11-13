@@ -1,0 +1,22 @@
+# build output
+bin/
+dist/
+*.exe
+!installer/*.exe
+
+# runtime data
+Json/
+7z/
+Logs/
+config.json
+license.json
+scan-report*.txt
+selftest.txt
+
+# editor / OS
+.vs/
+.vscode/
+*.user
+*.suo
+Thumbs.db
+desktop.ini
