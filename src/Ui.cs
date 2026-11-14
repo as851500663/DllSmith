@@ -22,6 +22,12 @@ using DllFix.Core;
 
 namespace DllFix.Ui
 {
+    /// <summary>页面进度上报接口（ScanPage / CleanPage 共用底部状态栏）</summary>
+    public interface IProgressHost
+    {
+        event Action<string, int, bool> StatusChanged;
+    }
+
     internal static class Theme
     {
         public static readonly Brush PageBg = Grad(Color.FromRgb(0xF3, 0xF7, 0xFE), Color.FromRgb(0xE9, 0xF1, 0xFC));
@@ -352,8 +358,8 @@ namespace DllFix.Ui
             card.Padding = new Thickness(12, 16, 12, 16);
 
             StackPanel sp = new StackPanel();
-            string[] labels = { "全面体检", "运行库修复", "DirectX 修复", "系统 DLL 修复", "系统文件下载" };
-            string[] glyphs = { "\uE80F", "\uE74C", "\uE7FC", "\uE8A5", "\uE896" };
+            string[] labels = { "全面体检", "运行库修复", "DirectX 修复", "系统 DLL 修复", "系统文件下载", "C 盘清理" };
+            string[] glyphs = { "\uE80F", "\uE74C", "\uE7FC", "\uE8A5", "\uE896", "\uEDA2" };
 
             for (int i = 0; i < labels.Length; i++)
             {
@@ -416,7 +422,7 @@ namespace DllFix.Ui
                 icon.Foreground = active ? Brushes.White : Theme.TextMuted;
             }
 
-            ScanPage page;
+            UserControl page;
             switch (index)
             {
                 case 1:
@@ -449,6 +455,9 @@ namespace DllFix.Ui
                         "从镜像源下载系统文件与运行库安装包（仅下载，不安装）。",
                         delegate { return Catalog.LoadSystemDll(Environment.Is64BitOperatingSystem); }, true);
                     break;
+                case 5:
+                    page = new CleanPage();
+                    break;
                 default:
                     page = new ScanPage("全面体检", glyphs[0],
                         "一键检测运行库、DirectX、系统 DLL 的完整性与运行状态。",
@@ -456,7 +465,8 @@ namespace DllFix.Ui
                     break;
             }
 
-            page.StatusChanged += delegate(string s, int percent, bool busy)
+            IProgressHost host = page as IProgressHost;
+            if (host != null) host.StatusChanged += delegate(string s, int percent, bool busy)
             {
                 _status.Text = s;
                 bool downloading = busy && percent > 0 && percent < 100;
@@ -670,7 +680,7 @@ namespace DllFix.Ui
     }
 
     // ── 扫描 / 修复页 ───────────────────────────────────────────────────────
-    public class ScanPage : UserControl
+    public class ScanPage : UserControl, IProgressHost
     {
         private readonly ObservableCollection<CatalogItem> _items = new ObservableCollection<CatalogItem>();
         private readonly Func<List<CatalogItem>> _loader;
