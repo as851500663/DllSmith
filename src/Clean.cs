@@ -75,28 +75,28 @@ namespace DllFix.Ui
 
             List<CleanItem> list = new List<CleanItem>();
 
-            Add(list, log, "用户临时文件", "%TEMP%", new string[] { Path.GetTempPath() });
-            Add(list, log, "系统临时文件", "%WINDIR%\\Temp", new string[] { Path.Combine(win, "Temp") });
+            Add(list, log, "用户临时文件", "%TEMP%", new string[] { Path.GetTempPath() }, true);
+            Add(list, log, "系统临时文件", "%WINDIR%\\Temp", new string[] { Path.Combine(win, "Temp") }, true);
             Add(list, log, "Windows 更新缓存", "SoftwareDistribution\\Download",
-                new string[] { Path.Combine(win, "SoftwareDistribution", "Download") });
+                new string[] { Path.Combine(win, "SoftwareDistribution", "Download") }, true);
             Add(list, log, "传递优化缓存", "DeliveryOptimization",
-                new string[] { Path.Combine(win, "SoftwareDistribution", "DeliveryOptimization") });
+                new string[] { Path.Combine(win, "SoftwareDistribution", "DeliveryOptimization") }, true);
             Add(list, log, "预读取文件", "Prefetch",
-                new string[] { Path.Combine(win, "Prefetch") });
+                new string[] { Path.Combine(win, "Prefetch") }, true);
             Add(list, log, "Windows 日志", "Logs / Panther",
-                new string[] { Path.Combine(win, "Logs"), Path.Combine(win, "Panther") });
+                new string[] { Path.Combine(win, "Logs"), Path.Combine(win, "Panther") }, false);
             Add(list, log, "崩溃转储", "CrashDumps",
-                new string[] { Path.Combine(local, "CrashDumps") });
+                new string[] { Path.Combine(local, "CrashDumps") }, false);
             Add(list, log, "系统内存转储", "MEMORY.DMP",
-                new string[] { Path.Combine(win, "MEMORY.DMP") });
+                new string[] { Path.Combine(win, "MEMORY.DMP") }, false);
             Add(list, log, "缩略图 / 图标缓存", "Explorer\\thumbcache",
-                new string[] { Path.Combine(local, "Microsoft", "Windows", "Explorer") });
+                new string[] { Path.Combine(local, "Microsoft", "Windows", "Explorer") }, true);
             Add(list, log, "Edge 缓存", "Edge\\User Data\\*\\Cache",
-                new string[] { Path.Combine(local, "Microsoft", "Edge", "User Data") });
+                new string[] { Path.Combine(local, "Microsoft", "Edge", "User Data") }, false);
             Add(list, log, "Chrome 缓存", "Chrome\\User Data\\*\\Cache",
-                new string[] { Path.Combine(local, "Google", "Chrome", "User Data") });
+                new string[] { Path.Combine(local, "Google", "Chrome", "User Data") }, false);
             Add(list, log, "微信 / QQ 缓存", "Tencent 缓存",
-                new string[] { Path.Combine(roam, "Tencent"), Path.Combine(local, "Tencent") });
+                new string[] { Path.Combine(roam, "Tencent"), Path.Combine(local, "Tencent") }, false);
 
             // 回收站
             long rb = RecycleBinSize();
@@ -118,7 +118,7 @@ namespace DllFix.Ui
             return list;
         }
 
-        private static void Add(List<CleanItem> list, Action<string> log, string name, string detail, string[] roots)
+        private static void Add(List<CleanItem> list, Action<string> log, string name, string detail, string[] roots, bool recommended)
         {
             long bytes = 0;
             int files = 0;
@@ -141,24 +141,33 @@ namespace DllFix.Ui
             it.Bytes = bytes;
             it.Files = files;
             it.Kind = CleanKind.Cache;
-            it.Selected = true;
+            it.Selected = recommended;
             list.Add(it);
             if (log != null) log(string.Format("{0}  {1}  ({2} 个文件)", name, FormatSize(bytes), files));
         }
 
         private static void MeasureDir(string dir, ref long bytes, ref int files, int depth)
         {
-            if (depth > 24) return;
-            try
+            Stack<string> stack = new Stack<string>();
+            stack.Push(dir);
+            int guard = 0;
+            while (stack.Count > 0 && guard++ < 200000)
             {
-                foreach (string f in Directory.EnumerateFiles(dir))
+                string cur = stack.Pop();
+                try
                 {
-                    try { bytes += new FileInfo(f).Length; files++; } catch { }
+                    foreach (string f in Directory.EnumerateFiles(cur))
+                    {
+                        try { bytes += new FileInfo(f).Length; files++; } catch { }
+                    }
+                    foreach (string d in Directory.EnumerateDirectories(cur))
+                    {
+                        if (IsJunction(d)) continue;     // 不跟随目录联接，避免死循环
+                        stack.Push(d);
+                    }
                 }
-                foreach (string d in Directory.EnumerateDirectories(dir))
-                    MeasureDir(d, ref bytes, ref files, depth + 1);
+                catch { }
             }
-            catch { }
         }
 
         /// <summary>删除选中项的缓存内容，返回释放字节数</summary>
@@ -188,7 +197,8 @@ namespace DllFix.Ui
                 long got = 0;
                 foreach (string root in (it.Path ?? "").Split(new string[] { " ; " }, StringSplitOptions.RemoveEmptyEntries))
                 {
-                    got += PurgePath(root, log);
+                    try { got += PurgePath(root, log); }
+                    catch (Exception ex) { if (log != null) log("清理异常（已跳过）：" + it.Name + " - " + ex.Message); }
                 }
                 freed += got;
                 it.Status = "已释放 " + FormatSize(got);
@@ -261,30 +271,70 @@ namespace DllFix.Ui
             return freed;
         }
 
-        /// <summary>删除目录内容（保留目录本身），占用文件跳过</summary>
+        /// <summary>白名单校验：只允许删除这些根之下的内容</summary>
+        private static readonly string[] AllowedRoots = new string[]
+        {
+            "\\temp\\", "\\windows\\temp", "\\windows\\logs", "\\windows\\panther",
+            "\\windows\\prefetch", "\\softwaredistribution", "\\crashdumps",
+            "\\microsoft\\windows\\explorer", "\\microsoft\\edge\\user data",
+            "\\google\\chrome\\user data", "\\tencent", "\\appdata\\local\\temp"
+        };
+
+        private static bool IsAllowed(string path)
+        {
+            string p = (path ?? "").ToLowerInvariant();
+            foreach (string r in AllowedRoots) if (p.Contains(r)) return true;
+            return false;
+        }
+
+        /// <summary>删除目录内容（保留目录本身）：迭代遍历、跳过联接、单文件失败只记录不中断</summary>
         private static long DeleteTreeContent(string dir, Action<string> log)
         {
-            long freed = 0;
-            List<string> files = new List<string>();
-            try { files.AddRange(Directory.GetFiles(dir)); } catch { }
-            foreach (string f in files)
+            if (!IsAllowed(dir))
             {
-                try
-                {
-                    long len = new FileInfo(f).Length;
-                    File.SetAttributes(f, FileAttributes.Normal);
-                    File.Delete(f);
-                    freed += len;
-                }
-                catch { }
+                if (log != null) log("拒绝清理（不在白名单）：" + dir);
+                return 0;
             }
+
+            long freed = 0;
+            Stack<string> pending = new Stack<string>();
             List<string> dirs = new List<string>();
-            try { dirs.AddRange(Directory.GetDirectories(dir)); } catch { }
-            foreach (string d in dirs)
+            pending.Push(dir);
+            int guard = 0;
+
+            while (pending.Count > 0 && guard++ < 200000)
             {
-                long sub = DeleteTreeContent(d, log);
-                freed += sub;
-                try { Directory.Delete(d, true); } catch { }
+                string cur = pending.Pop();
+                dirs.Add(cur);
+
+                List<string> files = new List<string>();
+                try { files.AddRange(Directory.GetFiles(cur)); } catch { }
+                foreach (string f in files)
+                {
+                    try
+                    {
+                        long len = new FileInfo(f).Length;
+                        File.SetAttributes(f, FileAttributes.Normal);
+                        File.Delete(f);
+                        freed += len;
+                    }
+                    catch { }               // 占用 / 权限不足：跳过
+                }
+
+                List<string> subs = new List<string>();
+                try { subs.AddRange(Directory.GetDirectories(cur)); } catch { }
+                foreach (string d in subs)
+                {
+                    if (IsJunction(d)) continue;
+                    pending.Push(d);
+                }
+            }
+
+            // 由深到浅删空目录
+            for (int i = dirs.Count - 1; i >= 0; i--)
+            {
+                if (string.Equals(dirs[i], dir, StringComparison.OrdinalIgnoreCase)) continue;
+                try { Directory.Delete(dirs[i], false); } catch { }
             }
             return freed;
         }
@@ -978,15 +1028,35 @@ namespace DllFix.Ui
                 Report("正在清理…", 0, true);
                 Thread t = new Thread(delegate()
                 {
-                    long freed = CleanEngine.CleanCaches(picked,
-                        delegate(int pct, string msg) { Report(msg, pct, true); },
-                        delegate(string s) { Dispatcher.BeginInvoke(new Action(delegate { LogLine(s); })); });
+                    long freed = 0;
+                    string err = null;
+                    try
+                    {
+                        freed = CleanEngine.CleanCaches(picked,
+                            delegate(int pct, string msg) { Report(msg, pct, true); },
+                            delegate(string s) { Dispatcher.BeginInvoke(new Action(delegate { LogLine(s); })); });
+                    }
+                    catch (Exception ex)
+                    {
+                        err = ex.ToString();
+                        Log.Error("clean crashed", ex);
+                    }
+                    long freedFinal = freed;
+                    string errFinal = err;
                     Dispatcher.BeginInvoke(new Action(delegate
                     {
                         EnterBusy(false);
                         UpdateStats();
-                        Report("清理完成，释放 " + CleanEngine.FormatSize(freed), 0, false);
-                        MessageBox.Show("清理完成，释放 " + CleanEngine.FormatSize(freed) + "。\n\n详情见日志面板。", "完成");
+                        if (errFinal != null)
+                        {
+                            Report("清理中断：" + errFinal.Split('\n')[0], 0, false);
+                            MessageBox.Show("清理过程中出现异常，已停止：\n" + errFinal, "清理失败");
+                        }
+                        else
+                        {
+                            Report("清理完成，释放 " + CleanEngine.FormatSize(freedFinal), 0, false);
+                            MessageBox.Show("清理完成，释放 " + CleanEngine.FormatSize(freedFinal) + "。\n\n详情见日志面板。", "完成");
+                        }
                         BeginScan();
                     }));
                 });

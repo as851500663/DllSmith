@@ -147,7 +147,7 @@ namespace DllFix.Core
         public const string ProductName = "DllSmith";
         public const string ChineseName = "DLL 修复匠";
         public const string Tagline = "开源运行库与 DLL 修复工具";
-        public const string Version = "1.1.0";
+        public const string Version = "1.1.1";
         public const string License = "GPL-3.0";
         public const string SiteUrl  = "http://123.57.94.141:8787/download";
         public const string BuildTag = "opensource";
@@ -418,6 +418,8 @@ namespace DllFix.Core
                 it.DisplayVersion = Json.GetString(d, "DISPLAYVERIONS", "DISPLAYVERSION");
                 it.FileName = Json.GetString(d, "FILENAME");
                 it.FilePath = Json.GetString(d, "FILEPATH");
+                string fp2 = (it.FilePath == null ? "" : it.FilePath.Trim());
+                if (fp2 == "0" || fp2 == "?" || fp2 == "???") it.FilePath = "";
                 it.Download = Json.GetString(d, "DOWNLOAD");
                 it.CommandLine = Json.GetString(d, "COMMANDLINE");
                 it.Wow6432Node = Json.GetString(d, "WOW6432NODE", "WOW6434NODE");
@@ -858,18 +860,26 @@ namespace DllFix.Core
             }
             else
             {
+                // 通配路径：先看 System32 / SysWOW64 有没有同名文件
                 string leaf = Path.GetFileName(p);
-                string stem = Path.GetFileNameWithoutExtension(leaf).ToLowerInvariant();
-                if (_sxsDirs == null || _sxsDirs.Count == 0)
+                string win = Path.Combine(Paths.SystemDrive, "Windows");
+                found = File.Exists(Path.Combine(win, "System32", leaf)) ||
+                        File.Exists(Path.Combine(win, "SysWOW64", leaf));
+
+                if (!found && _sxsDirs != null && _sxsDirs.Count > 0)
                 {
-                    found = true;                              // 没有索引：按"存在"处理，避免误报缺失
-                }
-                else
-                {
-                    found = false;
+                    // WinSxS 目录名形如 amd64_microsoft.vc80.atl_1fc8b3b...，
+                    // 用"字母前缀 + 版本数字"两个 token 同时命中才算存在（atl80 -> atl + 80）
+                    string stem = Path.GetFileNameWithoutExtension(leaf).ToLowerInvariant();
+                    string alpha = new string(stem.TakeWhile(delegate(char c) { return c < '0' || c > '9'; }).ToArray());
+                    string digits = new string(stem.Where(delegate(char c) { return c >= '0' && c <= '9'; }).ToArray());
+                    if (alpha.Length == 0) alpha = stem;
+
                     foreach (string d in _sxsDirs)
                     {
-                        if (d.IndexOf(stem, StringComparison.Ordinal) >= 0) { found = true; break; }
+                        bool ok = d.IndexOf(alpha, StringComparison.Ordinal) >= 0;
+                        if (ok && digits.Length > 0) ok = d.IndexOf(digits, StringComparison.Ordinal) >= 0;
+                        if (ok) { found = true; break; }
                     }
                 }
             }

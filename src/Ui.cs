@@ -432,6 +432,7 @@ namespace DllFix.Ui
                         {
                             List<CatalogItem> l = Catalog.LoadRuntime("运行库", "VC_Scan", Environment.Is64BitOperatingSystem);
                             l.AddRange(Catalog.LoadRuntime("运行库", "VC_DLL_Scan", Environment.Is64BitOperatingSystem));
+                            l.AddRange(Catalog.LoadRuntime("运行库", "NETWORK", Environment.Is64BitOperatingSystem));
                             return l;
                         }, false);
                     break;
@@ -468,13 +469,23 @@ namespace DllFix.Ui
             IProgressHost host = page as IProgressHost;
             if (host != null) host.StatusChanged += delegate(string s, int percent, bool busy)
             {
-                _status.Text = s;
-                bool downloading = busy && percent > 0 && percent < 100;
-                _spin.Visibility = downloading ? Visibility.Visible : Visibility.Collapsed;
-                _percent.Visibility = downloading ? Visibility.Visible : Visibility.Collapsed;
-                _percent.Text = percent + "%";
+                if (!Dispatcher.CheckAccess())
+                {
+                    Dispatcher.BeginInvoke(new Action(delegate { UpdateStatus(s, percent, busy); }));
+                    return;
+                }
+                UpdateStatus(s, percent, busy);
             };
             _host.Content = page;
+        }
+
+        private void UpdateStatus(string s, int percent, bool busy)
+        {
+            _status.Text = s;
+            bool downloading = busy && percent > 0 && percent < 100;
+            _spin.Visibility = downloading ? Visibility.Visible : Visibility.Collapsed;
+            _percent.Visibility = downloading ? Visibility.Visible : Visibility.Collapsed;
+            _percent.Text = percent + "%";
         }
 
         private static List<CatalogItem> LoadAll()
