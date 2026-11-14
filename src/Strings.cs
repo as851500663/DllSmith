@@ -26,8 +26,8 @@ namespace DllFix.Ui
         public const string NavRuntime = "运行库修复";
         public const string NavDirectX = "DirectX 修复";
         public const string NavSystemDll = "系统 DLL 修复";
-        public const string NavDownLevel = "系统文件修复";
-        public const string NavDownload = "系统文件下载";
+        public const string NavDownLevel = "系统 API 修复";
+        public const string NavDownload = "离线包下载";
         public const string NavClean = "C 盘清理";
 
         // ── 页面描述 ────────────────────────────────────────────────────────

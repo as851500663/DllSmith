@@ -254,12 +254,12 @@ namespace DllFix.Ui
                 delegate { return Catalog.LoadSystemDll(Environment.Is64BitOperatingSystem); });
 
             // P0 修复：原来是 4，与「系统文件下载」共用 ScanStore key=4 -> 页面互相覆盖结果
-            AddSection(host, "系统文件", "\uE896",
-                "DownLevel API 集（api-ms-win-*）", 6,
+            AddSection(host, "系统 API", "\uE896",
+                "DownLevel API 集（api-ms-win-*）", 4,
                 delegate { return Catalog.LoadRuntime("DownLevel", "downlevel", Environment.Is64BitOperatingSystem); });
 
             AddSection(host, "C 盘清理", "\uEDA2",
-                "临时文件、更新缓存、日志、回收站等可释放空间", 5, null);
+                "临时文件、更新缓存、日志、回收站等可释放空间", 6, null);
 
             Grid.SetRow(sv, 3);
             root.Children.Add(sv);

@@ -503,7 +503,7 @@ namespace DllFix.Ui
 
         private void ShowPage(int index)
         {
-            string[] glyphs = { "\uE80F", "\uE74C", "\uE7FC", "\uE8A5", "\uE896" };
+            string[] glyphs = { "\uE80F", "\uE74C", "\uE7FC", "\uE8A5", "\uE896", "\uE896", "\uEDA2" };
             for (int i = 0; i < _navItems.Count; i++)
             {
                 bool active = i == index;
@@ -540,15 +540,15 @@ namespace DllFix.Ui
                     page = new ScanPage(Str.NavSystemDll, glyphs[3], Str.DescSystemDll,
                         delegate { return Catalog.LoadSystemDll(Environment.Is64BitOperatingSystem); }, false, 3);
                     break;
-                case 6:
-                    page = new ScanPage(Str.NavDownLevel, glyphs[4], Str.DescDownLevel,
-                        delegate { return Catalog.LoadRuntime("DownLevel", "downlevel", Environment.Is64BitOperatingSystem); }, false, 6);
-                    break;
                 case 4:
-                    page = new ScanPage(Str.NavDownload, glyphs[5], Str.DescDownload,
-                        delegate { return Catalog.LoadSystemDll(Environment.Is64BitOperatingSystem); }, true, 4);
+                    page = new ScanPage(Str.NavDownLevel, glyphs[4], Str.DescDownLevel,
+                        delegate { return Catalog.LoadRuntime("DownLevel", "downlevel", Environment.Is64BitOperatingSystem); }, false, 4);
                     break;
                 case 5:
+                    page = new ScanPage(Str.NavDownload, glyphs[5], Str.DescDownload,
+                        delegate { return Catalog.LoadSystemDll(Environment.Is64BitOperatingSystem); }, true, 5);
+                    break;
+                case 6:
                     page = new CleanPage();
                     break;
                 case 0:

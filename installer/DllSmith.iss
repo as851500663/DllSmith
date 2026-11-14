@@ -9,7 +9,7 @@
 
 #define AppName "DllSmith"
 #define AppNameCN "DLL 修复匠"
-#define AppVersion "1.4.0"
+#define AppVersion "1.4.1"
 #define AppPublisher "DllSmith Project"
 #define AppURL "https://github.com/as851500663/DllSmith"
 #define AppExeName "DllSmith.exe"

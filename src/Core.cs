@@ -175,7 +175,7 @@ namespace DllFix.Core
 #if DS_TESTBUILD
         public const string Version = "1.4.0-test";     // 测试构建：名字/版本都带 -test，防止误发
 #else
-        public const string Version = "1.4.0";
+        public const string Version = "1.4.1";
 #endif
         public const string License = "GPL-3.0";
         public const string SiteUrl  = "https://123.57.94.141:9443/download";
