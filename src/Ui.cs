@@ -459,10 +459,11 @@ namespace DllFix.Ui
                 case 5:
                     page = new CleanPage();
                     break;
+                case 0:
                 default:
-                    page = new ScanPage("全面体检", glyphs[0],
-                        "一键检测运行库、DirectX、系统 DLL 的完整性与运行状态。",
-                        LoadAll, false);
+                    OverviewPage ov = new OverviewPage();
+                    ov.Navigate += delegate(int target) { ShowPage(target); };
+                    page = ov;
                     break;
             }
 
@@ -699,6 +700,7 @@ namespace DllFix.Ui
         private readonly string _title;
 
         private readonly ListBox _list = new ListBox();
+        private TextBlock _placeholder;
         private readonly TextBox _logBox = new TextBox();
         private readonly TextBlock _logLast = new TextBlock();
         private readonly Button _logToggle = new Button();
@@ -726,7 +728,7 @@ namespace DllFix.Ui
 
             Build(title, glyph, desc);
             Log.LineWritten += OnLogLine;
-            Loaded += delegate { BeginScan(); };
+            // 不再自动扫描：由用户点「开始检查」触发
             Unloaded += delegate { Log.LineWritten -= OnLogLine; };
         }
 
@@ -789,7 +791,7 @@ namespace DllFix.Ui
             mid.Children.Add(cards);
 
             StackPanel actions = new StackPanel { Orientation = Orientation.Horizontal, VerticalAlignment = VerticalAlignment.Center };
-            StyleButton(_btnScan, "重新扫描", false, "\uE72C");
+            StyleButton(_btnScan, "开始检查", false, "\uE72C");
             _btnScan.Click += delegate { BeginScan(); };
             StyleButton(_btnRepair, _downloadOnly ? "一键下载" : "一键修复", true, "\uE8B0");
             _btnRepair.Click += delegate { BeginRepair(); };
@@ -833,6 +835,16 @@ namespace DllFix.Ui
             _list.Resources.Add(typeof(ScrollBar), BuildScrollBarStyle(false));
             Grid.SetRow(_list, 1);
             table.Children.Add(_list);
+
+            _placeholder = new TextBlock();
+            _placeholder.Text = "尚未检查：点击右上角「开始检查」开始检测这一类。";
+            _placeholder.FontSize = 13;
+            _placeholder.Foreground = Theme.TextMuted;
+            _placeholder.HorizontalAlignment = HorizontalAlignment.Center;
+            _placeholder.VerticalAlignment = VerticalAlignment.Center;
+            _placeholder.Margin = new Thickness(0, 24, 0, 24);
+            Grid.SetRow(_placeholder, 1);
+            table.Children.Add(_placeholder);
 
             tableCard.Child = table;
             root.Children.Add(tableCard);
@@ -1017,6 +1029,15 @@ namespace DllFix.Ui
             sp.Children.Add(g);
             sp.Children.Add(t);
             b.Content = sp;
+        }
+
+        /// <summary>改按钮上的文字（StackPanel: 图标 + 文字）</summary>
+        private static void SetButtonText(Button b, string text)
+        {
+            StackPanel sp = b.Content as StackPanel;
+            if (sp == null || sp.Children.Count < 2) return;
+            TextBlock t = sp.Children[1] as TextBlock;
+            if (t != null) t.Text = text;
         }
 
         private Style BuildRowStyle()

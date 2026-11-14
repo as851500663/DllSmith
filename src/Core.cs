@@ -147,7 +147,7 @@ namespace DllFix.Core
         public const string ProductName = "DllSmith";
         public const string ChineseName = "DLL 修复匠";
         public const string Tagline = "开源运行库与 DLL 修复工具";
-        public const string Version = "1.1.1";
+        public const string Version = "1.2.0";
         public const string License = "GPL-3.0";
         public const string SiteUrl  = "http://123.57.94.141:8787/download";
         public const string BuildTag = "opensource";

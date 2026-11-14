@@ -613,8 +613,7 @@ namespace DllFix.Ui
 
         public CleanPage()
         {
-            Build();
-            Loaded += delegate { BeginScan(); };
+            Build();   // 不自动扫描：由「检查可用空间」按钮触发
         }
 
         private void Report(string text, int percent, bool busy)
@@ -724,7 +723,7 @@ namespace DllFix.Ui
             _targetBox = targetBox;
 
             StackPanel acts = new StackPanel { Orientation = Orientation.Horizontal, HorizontalAlignment = HorizontalAlignment.Right };
-            StyleBtn(_btnScan, "重新扫描", false);
+            StyleBtn(_btnScan, "检查可用空间", false);
             StyleBtn(_btnAction, "立即清理", true);
             _btnScan.Click += delegate { BeginScan(); };
             _btnAction.Click += delegate { DoAction(); };
@@ -744,6 +743,17 @@ namespace DllFix.Ui
             _list.Resources.Add(typeof(ScrollBar), BuildScrollBar());
             Grid.SetRow(_list, 1);
             g.Children.Add(_list);
+
+            _placeholder = new TextBlock();
+            _placeholder.Text = _mode == 0
+                ? "尚未检查：点击右上角「检查可用空间」统计可清理项。"
+                : "尚未检查：点击右上角「检查可用空间」扫描 AppData 大文件夹。";
+            _placeholder.FontSize = 13;
+            _placeholder.Foreground = Theme.TextMuted;
+            _placeholder.HorizontalAlignment = HorizontalAlignment.Center;
+            _placeholder.VerticalAlignment = VerticalAlignment.Center;
+            Grid.SetRow(_placeholder, 1);
+            g.Children.Add(_placeholder);
 
             card.Child = g;
             Grid.SetRow(card, 2);
@@ -833,6 +843,7 @@ namespace DllFix.Ui
         }
 
         private StackPanel _targetBox;
+        private TextBlock _placeholder;
 
         private Border StatCard(string title, TextBlock value, Color accent)
         {
@@ -974,6 +985,7 @@ namespace DllFix.Ui
                     foreach (CleanItem it in found) _items.Add(it);
                     UpdateStats();
                     EnterBusy(false);
+                    if (_placeholder != null) _placeholder.Visibility = found.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
                     Report(string.Format("扫描完成：{0} 项，共 {1}", found.Count,
                         CleanEngine.FormatSize(found.Sum(delegate(CleanItem x) { return x.Bytes; }))), 0, false);
                 }));
