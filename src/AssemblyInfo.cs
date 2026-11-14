@@ -22,13 +22,13 @@ using System.Runtime.InteropServices;
 // 测试构建（/define:DS_TESTBUILD）在信息版本里显式标注，配合 build.ps1 的 *-test.exe 命名，
 // 双保险防止把带测试钥匙的产物误发出去（t13）。
 #if DS_TESTBUILD
-[assembly: AssemblyVersion("1.4.0.0")]
-[assembly: AssemblyFileVersion("1.4.0.0")]
-[assembly: AssemblyInformationalVersion("1.4.0-test DO-NOT-SHIP")]
+[assembly: AssemblyVersion("1.4.1.0")]
+[assembly: AssemblyFileVersion("1.4.1.0")]
+[assembly: AssemblyInformationalVersion("1.4.1-test DO-NOT-SHIP")]
 #else
-[assembly: AssemblyVersion("1.4.0.0")]
-[assembly: AssemblyFileVersion("1.4.0.0")]
-[assembly: AssemblyInformationalVersion("1.4.0")]
+[assembly: AssemblyVersion("1.4.1.0")]
+[assembly: AssemblyFileVersion("1.4.1.0")]
+[assembly: AssemblyInformationalVersion("1.4.1")]
 #endif
 
 [assembly: ComVisible(false)]
