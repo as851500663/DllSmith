@@ -66,6 +66,9 @@ namespace DllFix.Ui
         public int Files { get; set; }
         public bool Selected { get; set; }
         public CleanKind Kind { get; set; }
+        /// <summary>所属磁盘根目录（回收站项用，如 C:\）</summary>
+        public string Drive { get; set; }
+
         public string Status
         {
             get { return _status; }
@@ -133,19 +136,25 @@ namespace DllFix.Ui
             Add(list, log, "微信 / QQ 缓存", "Tencent 缓存",
                 new string[] { Path.Combine(roam, "Tencent"), Path.Combine(local, "Tencent") }, false);
 
-            // 回收站
-            long rb = RecycleBinSize();
-            if (rb > 0)
+            // 回收站：按磁盘分别统计（SHQueryRecycleBin(null) 是全部磁盘合计，容易误判）
+            foreach (DriveInfo d in DriveInfo.GetDrives())
             {
+                if (!d.IsReady) continue;
+                if (d.DriveType != DriveType.Fixed) continue;
+                long rb;
+                try { rb = RecycleBinSize(d.Name); } catch { continue; }
+                if (rb <= 0) continue;
+
                 CleanItem it = new CleanItem();
-                it.Name = "回收站";
+                it.Name = "回收站 (" + d.Name.TrimEnd('\\') + ")";
                 it.Detail = "清空后不可恢复";
-                it.Path = "::{645FF040-5081-101B-9F08-00AA002F954E}";
+                it.Path = "recycle:" + d.Name;
+                it.Drive = d.Name;
                 it.Bytes = rb;
                 it.Kind = CleanKind.Cache;
-                it.Selected = false;   // 回收站默认不勾选，避免误清空
+                it.Selected = false;   // 默认不勾选，避免误清空
                 list.Add(it);
-                if (log != null) log("回收站 " + FormatSize(rb));
+                if (log != null) log(it.Name + " " + FormatSize(rb));
             }
 
             // 按大小排序，大的在前
@@ -222,16 +231,25 @@ namespace DllFix.Ui
                 idx++;
                 if (progress != null) progress(0, "正在清理：" + it.Name);
 
-                if (it.Name == "回收站")
+                if (it.Name != null && it.Name.StartsWith("回收站"))
                 {
-                    long before = RecycleBinSize();
-                    EmptyRecycleBin();
-                    long after = RecycleBinSize();
-                    long d = Math.Max(0, before - after);
+                    string root = string.IsNullOrEmpty(it.Drive) ? null : it.Drive;
+                    long freeBefore = DriveFree(root);
+                    long sizeBefore = RecycleBinSize(root);
+                    EmptyRecycleBin(root);
+                    long sizeAfter = RecycleBinSize(root);
+                    long freeAfter = DriveFree(root);
+
+                    long claimed = Math.Max(0, sizeBefore - sizeAfter);
+                    long real = Math.Max(0, freeAfter - freeBefore);
+                    long d = real > 0 ? real : claimed;   // 以真实可用空间为准
                     freed += d;
                     it.Percent = 100;
-                    it.Status = "已清空 " + FormatSize(d);
-                    if (log != null) log("回收站：释放 " + FormatSize(d));
+                    it.Status = string.Format("已清空 {0}（可用 +{1}）", FormatSize(claimed), FormatSize(real));
+                    if (log != null)
+                        log(string.Format("{0}：回收站 {1} → 可用空间 {2} → {3}（实际 +{4}）",
+                            it.Name, FormatSize(sizeBefore), FormatSize(freeBefore),
+                            FormatSize(freeAfter), FormatSize(real)));
                     continue;
                 }
 
@@ -634,22 +652,29 @@ namespace DllFix.Ui
         [DllImport("shell32.dll", CharSet = CharSet.Unicode)]
         private static extern int SHEmptyRecycleBin(IntPtr hwnd, string pszRootPath, uint dwFlags);
 
-        public static long RecycleBinSize()
+        /// <summary>指定磁盘的回收站大小；root 为 null 时是全部磁盘合计</summary>
+        public static long RecycleBinSize(string root)
         {
             try
             {
                 SHQUERYRBINFO info = new SHQUERYRBINFO();
                 info.cbSize = Marshal.SizeOf(typeof(SHQUERYRBINFO));
-                int hr = SHQueryRecycleBin(null, ref info);
+                int hr = SHQueryRecycleBin(root, ref info);
                 if (hr == 0) return info.i64Size;
             }
             catch { }
             return 0;
         }
 
-        public static void EmptyRecycleBin()
+        public static void EmptyRecycleBin(string root)
         {
-            try { SHEmptyRecycleBin(IntPtr.Zero, null, 0x1 | 0x2 | 0x4); } catch { }
+            try { SHEmptyRecycleBin(IntPtr.Zero, root, 0x1 | 0x2 | 0x4); } catch { }
+        }
+
+        public static long DriveFree(string root)
+        {
+            try { return string.IsNullOrEmpty(root) ? 0 : new DriveInfo(root).AvailableFreeSpace; }
+            catch { return 0; }
         }
 
         public static string DiskText()
@@ -723,6 +748,7 @@ namespace DllFix.Ui
         private readonly TextBlock _statSel = new TextBlock();
 
         private bool _busy;
+        private long freeBeforeAction;
         private int _mode;      // 0 = 缓存清理，1 = 大文件夹迁移
 
         public event Action<string, int, bool> StatusChanged;
@@ -1243,6 +1269,7 @@ namespace DllFix.Ui
                 if (r != MessageBoxResult.Yes) return;
 
                 CleanEngine.CancelRequested = false;
+                freeBeforeAction = CleanEngine.DiskFree();
                 EnterBusy(true);
                 Report("正在清理…", 0, true);
                 Thread t = new Thread(delegate()
@@ -1273,8 +1300,14 @@ namespace DllFix.Ui
                         }
                         else
                         {
+                            long freeNow = CleanEngine.DiskFree();
+                            long delta = freeNow - freeBeforeAction;
                             Report("清理完成，释放 " + CleanEngine.FormatSize(freedFinal), 0, false);
-                            MessageBox.Show("清理完成，释放 " + CleanEngine.FormatSize(freedFinal) + "。\n\n详情见日志面板。", "完成");
+                            MessageBox.Show(string.Format("清理完成。\n\n统计释放：{0}\nC 盘可用：{1} → {2}（实际 +{3}）\n\n详情见日志面板。",
+                                CleanEngine.FormatSize(freedFinal),
+                                CleanEngine.FormatSize(freeBeforeAction),
+                                CleanEngine.FormatSize(freeNow),
+                                CleanEngine.FormatSize(delta < 0 ? 0 : delta)), "完成");
                             // 保留列表：每行保留「完成」与已释放大小，便于核对
                         }
                     }));
