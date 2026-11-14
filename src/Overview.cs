@@ -1,12 +1,11 @@
 // ============================================================================
 //  DllSmith — 全面体检（分类总览）
 //  文件：Overview.cs
-//  目的：不再一进页面就全量扫描。按分类（运行库 / DirectX / 系统 DLL / 系统文件 /
-//        C 盘清理）分块展示，点哪个「检查」就只查那一类；结果就地展开。
+//  要点：不自动扫描；分类卡片各自「检查」；顶部汇总（检查项 / 缺失 / 可释放）
+//        + 全部检查时的总进度条。
 // ============================================================================
 using System;
 using System.Collections.Generic;
-using System.Linq;
 using System.Threading;
 using System.Windows;
 using System.Windows.Controls;
@@ -19,14 +18,13 @@ namespace DllFix.Ui
 {
     public class OverviewPage : UserControl, IProgressHost
     {
-        // 单个分类
         private class Section
         {
             public string Title;
             public string Glyph;
             public string Desc;
-            public Func<List<CatalogItem>> Loader;   // null = C 盘清理（特殊处理）
-            public int PageIndex = -1;               // 「详情」跳转的页面序号
+            public Func<List<CatalogItem>> Loader;   // null = C 盘清理
+            public int PageIndex = -1;
 
             public Border Card;
             public TextBlock Status;
@@ -34,6 +32,8 @@ namespace DllFix.Ui
             public Button GoBtn;
             public ListBox List;
             public bool Busy;
+            public bool Checked;
+            public bool Checking;
             public int Missing;
             public int Total;
             public long CleanBytes;
@@ -41,6 +41,12 @@ namespace DllFix.Ui
 
         private readonly List<Section> _sections = new List<Section>();
         private readonly Button _all = new Button();
+        private readonly ProgressBar _bar = new ProgressBar();
+        private readonly TextBlock _barText = new TextBlock();
+        private readonly Border _barHost = new Border();
+        private readonly TextBlock _sumTotal = new TextBlock();
+        private readonly TextBlock _sumMissing = new TextBlock();
+        private readonly TextBlock _sumFree = new TextBlock();
         private bool _busyAll;
 
         public event Action<string, int, bool> StatusChanged;
@@ -49,6 +55,7 @@ namespace DllFix.Ui
         public OverviewPage()
         {
             Build();
+            UpdateSummary();
         }
 
         private void Report(string text, int percent, bool busy)
@@ -66,8 +73,10 @@ namespace DllFix.Ui
         private void Build()
         {
             Grid root = new Grid();
-            root.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
-            root.RowDefinitions.Add(new RowDefinition());
+            root.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });   // 页头
+            root.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });   // 汇总卡
+            root.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });   // 进度条
+            root.RowDefinitions.Add(new RowDefinition());                              // 分类列表
 
             // 页头
             Grid head = new Grid();
@@ -111,8 +120,63 @@ namespace DllFix.Ui
             _all.Click += delegate { CheckAll(); };
             Grid.SetColumn(_all, 1);
             head.Children.Add(_all);
-            head.Margin = new Thickness(0, 0, 0, 14);
+            head.Margin = new Thickness(0, 0, 0, 12);
             root.Children.Add(head);
+
+            // 汇总卡
+            StackPanel stats = new StackPanel { Orientation = Orientation.Horizontal, Margin = new Thickness(0, 0, 0, 12) };
+            stats.Children.Add(StatCard("已检查项", _sumTotal, Color.FromRgb(0x1F, 0x6F, 0xE0)));
+            stats.Children.Add(StatCard("缺失合计", _sumMissing, Color.FromRgb(0xD0, 0x5A, 0x5A)));
+            stats.Children.Add(StatCard("可清理空间", _sumFree, Color.FromRgb(0x1E, 0x9A, 0x5A)));
+            Grid.SetRow(stats, 1);
+            root.Children.Add(stats);
+
+            // 进度条（仅检查时显示）
+            _barHost.Background = new SolidColorBrush(Color.FromRgb(0xF7, 0xFA, 0xFF));
+            _barHost.BorderBrush = new SolidColorBrush(Color.FromRgb(0xE7, 0xEF, 0xFB));
+            _barHost.BorderThickness = new Thickness(1);
+            _barHost.CornerRadius = new CornerRadius(12);
+            _barHost.Padding = new Thickness(14, 10, 14, 10);
+            _barHost.Margin = new Thickness(0, 0, 0, 12);
+            _barHost.Visibility = Visibility.Collapsed;
+
+            Grid pg = new Grid();
+            pg.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+            pg.ColumnDefinitions.Add(new ColumnDefinition());
+            pg.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+
+            _barText.Text = "准备检查…";
+            _barText.FontSize = 12;
+            _barText.Foreground = Theme.TextBody;
+            _barText.VerticalAlignment = VerticalAlignment.Center;
+            _barText.Margin = new Thickness(0, 0, 12, 0);
+            pg.Children.Add(_barText);
+
+            _bar.Height = 8;
+            _bar.Minimum = 0;
+            _bar.Maximum = 100;
+            _bar.Value = 0;
+            _bar.Foreground = Theme.PrimarySoft;
+            _bar.Background = new SolidColorBrush(Color.FromRgb(0xE6, 0xEC, 0xF6));
+            _bar.BorderThickness = new Thickness(0);
+            _bar.VerticalAlignment = VerticalAlignment.Center;
+            Grid.SetColumn(_bar, 1);
+            pg.Children.Add(_bar);
+
+            TextBlock pct = new TextBlock();
+            pct.Name = "pct";
+            pct.Text = "0%";
+            pct.FontSize = 12;
+            pct.Foreground = Theme.Primary;
+            pct.VerticalAlignment = VerticalAlignment.Center;
+            pct.Margin = new Thickness(12, 0, 0, 0);
+            _barPct = pct;
+            Grid.SetColumn(pct, 2);
+            pg.Children.Add(pct);
+
+            _barHost.Child = pg;
+            Grid.SetRow(_barHost, 2);
+            root.Children.Add(_barHost);
 
             // 分类列表
             ScrollViewer sv = new ScrollViewer();
@@ -146,10 +210,40 @@ namespace DllFix.Ui
             AddSection(host, "C 盘清理", "\uEDA2",
                 "临时文件、更新缓存、日志、回收站等可释放空间", 5, null);
 
-            Grid.SetRow(sv, 1);
+            Grid.SetRow(sv, 3);
             root.Children.Add(sv);
 
             Content = root;
+        }
+
+        private TextBlock _barPct;
+
+        private Border StatCard(string title, TextBlock value, Color accent)
+        {
+            Border card = new Border();
+            card.Width = 194;
+            card.Height = 78;
+            card.Margin = new Thickness(0, 0, 12, 0);
+            card.Background = Theme.Card;
+            card.CornerRadius = new CornerRadius(18);
+            card.BorderBrush = Theme.CardLine;
+            card.BorderThickness = new Thickness(1);
+            card.Padding = new Thickness(18, 12, 18, 12);
+
+            StackPanel sp = new StackPanel();
+            TextBlock t = new TextBlock();
+            t.Text = title;
+            t.FontSize = 12;
+            t.Foreground = Theme.TextMuted;
+            value.Text = "—";
+            value.FontSize = 19;
+            value.FontWeight = FontWeights.SemiBold;
+            value.Foreground = new SolidColorBrush(accent);
+            value.Margin = new Thickness(0, 6, 0, 0);
+            sp.Children.Add(t);
+            sp.Children.Add(value);
+            card.Child = sp;
+            return card;
         }
 
         private void AddSection(StackPanel host, string title, string glyph, string desc, int pageIndex,
@@ -311,23 +405,70 @@ namespace DllFix.Ui
             return (Style)XamlReader.Parse(xaml);
         }
 
+        // ── 汇总 ────────────────────────────────────────────────────────────
+        private void UpdateSummary()
+        {
+            if (!Dispatcher.CheckAccess())
+            {
+                Dispatcher.BeginInvoke(new Action(UpdateSummary));
+                return;
+            }
+            int total = 0, missing = 0;
+            long free = 0;
+            foreach (Section s in _sections)
+            {
+                if (!s.Checked) continue;
+                total += s.Total;
+                missing += s.Missing;
+                free += s.CleanBytes;
+            }
+            _sumTotal.Text = total + " 项";
+            _sumMissing.Text = missing + " 项";
+            _sumFree.Text = CleanEngine.FormatSize(free);
+        }
+
+        private void SetProgress(bool visible, int percent, string text)
+        {
+            if (!Dispatcher.CheckAccess())
+            {
+                Dispatcher.BeginInvoke(new Action(delegate { SetProgress(visible, percent, text); }));
+                return;
+            }
+            _barHost.Visibility = visible ? Visibility.Visible : Visibility.Collapsed;
+            if (!visible) return;
+            if (percent < 0) { _bar.IsIndeterminate = true; }
+            else { _bar.IsIndeterminate = false; _bar.Value = percent; }
+            if (_barPct != null) _barPct.Text = percent < 0 ? "…" : percent + "%";
+            if (text != null) _barText.Text = text;
+        }
+
         // ── 检查 ────────────────────────────────────────────────────────────
         private void CheckAll()
         {
             if (_busyAll) return;
             _busyAll = true;
             _all.IsEnabled = false;
+            List<Section> list = new List<Section>(_sections);
+
             Thread t = new Thread(delegate()
             {
-                foreach (Section s in _sections)
+                for (int i = 0; i < list.Count; i++)
                 {
+                    Section s = list[i];
+                    Report(string.Format("正在检查 {0}/{1}：{2}", i + 1, list.Count, s.Title), 0, true);
+                    SetProgress(true, (int)(i * 100.0 / list.Count), string.Format("正在检查：{0}（{1}/{2}）", s.Title, i + 1, list.Count));
                     RunCheck(s);
+                    SetProgress(true, (int)((i + 1) * 100.0 / list.Count),
+                        string.Format("已完成：{0}（{1}/{2}）", s.Title, i + 1, list.Count));
                 }
                 Dispatcher.BeginInvoke(new Action(delegate
                 {
                     _busyAll = false;
                     _all.IsEnabled = true;
+                    UpdateSummary();
+                    SetProgress(true, 100, "全部检查完成");
                     Report("全部检查完成", 0, false);
+                    MessageBox.Show("全部检查完成。\n\n缺失合计与可清理空间见上方汇总卡。", "完成");
                 }));
             });
             t.IsBackground = true;
@@ -337,6 +478,7 @@ namespace DllFix.Ui
         private void CheckSection(Section s)
         {
             if (s.Busy) return;
+            SetProgress(true, -1, "正在检查：" + s.Title);
             Thread t = new Thread(delegate() { RunCheck(s); });
             t.IsBackground = true;
             t.Start();
@@ -347,17 +489,16 @@ namespace DllFix.Ui
             s.Busy = true;
             Dispatcher.BeginInvoke(new Action(delegate
             {
+                s.Checking = true;
                 s.Status.Text = "检查中…";
                 s.Status.Foreground = Theme.Primary;
                 s.CheckBtn.IsEnabled = false;
-                Report("正在检查：" + s.Title, 0, true);
             }));
 
             try
             {
                 if (s.Loader == null)
                 {
-                    // C 盘清理：只做空间统计，不删任何东西
                     List<CleanItem> caches = CleanEngine.ScanCaches(null);
                     long bytes = 0;
                     foreach (CleanItem it in caches) bytes += it.Bytes;
@@ -367,6 +508,7 @@ namespace DllFix.Ui
 
                     Dispatcher.BeginInvoke(new Action(delegate
                     {
+                        s.Checked = true;
                         s.Status.Text = "可释放 " + CleanEngine.FormatSize(bytes);
                         s.Status.Foreground = new SolidColorBrush(Color.FromRgb(0x1E, 0x9A, 0x5A));
                         s.List.ItemsSource = caches;
@@ -374,6 +516,8 @@ namespace DllFix.Ui
                         s.List.Height = 150;
                         s.CheckBtn.IsEnabled = true;
                         s.Busy = false;
+                        UpdateSummary();
+                        if (!_busyAll) SetProgress(false, 0, null);
                     }));
                     return;
                 }
@@ -413,6 +557,7 @@ namespace DllFix.Ui
 
                 Dispatcher.BeginInvoke(new Action(delegate
                 {
+                    s.Checked = true;
                     s.Missing = miss;
                     s.Total = total;
                     if (miss > 0)
@@ -430,7 +575,8 @@ namespace DllFix.Ui
                     s.List.Height = 150;
                     s.CheckBtn.IsEnabled = true;
                     s.Busy = false;
-                    Report(s.Title + " 检查完成", 0, false);
+                    UpdateSummary();
+                    if (!_busyAll) SetProgress(false, 0, null);
                 }));
             }
             catch (Exception ex)
@@ -442,6 +588,7 @@ namespace DllFix.Ui
                     s.Status.Foreground = new SolidColorBrush(Color.FromRgb(0xD0, 0x5A, 0x5A));
                     s.CheckBtn.IsEnabled = true;
                     s.Busy = false;
+                    if (!_busyAll) SetProgress(false, 0, null);
                 }));
             }
         }
