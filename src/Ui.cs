@@ -708,6 +708,7 @@ namespace DllFix.Ui
         private bool _logExpanded;
         private readonly Button _btnScan = new Button();
         private readonly Button _btnRepair = new Button();
+        private readonly Button _btnStop = new Button();
         private readonly Border _allCheck = new Border();
         private readonly TextBlock _allCheckGlyph = new TextBlock();
 
@@ -795,8 +796,18 @@ namespace DllFix.Ui
             _btnScan.Click += delegate { BeginScan(); };
             StyleButton(_btnRepair, _downloadOnly ? "一键下载" : "一键修复", true, "\uE8B0");
             _btnRepair.Click += delegate { BeginRepair(); };
+            StyleButton(_btnStop, "停止", false, "\uE71A");
+            _btnStop.Margin = new Thickness(8, 0, 0, 0);
+            _btnStop.Visibility = Visibility.Collapsed;
+            _btnStop.Click += delegate
+            {
+                if (_cts != null) _cts.Cancel();
+                _btnStop.IsEnabled = false;
+                Report("正在停止…", 0, true);
+            };
             actions.Children.Add(_btnScan);
             actions.Children.Add(_btnRepair);
+            actions.Children.Add(_btnStop);
             Grid.SetColumn(actions, 1);
             mid.Children.Add(actions);
             root.Children.Add(mid);
@@ -978,6 +989,11 @@ namespace DllFix.Ui
         private void EnterBusy(bool on)
         {
             _busy = on;
+            if (_btnStop != null)
+            {
+                _btnStop.Visibility = on ? Visibility.Visible : Visibility.Collapsed;
+                _btnStop.IsEnabled = on;
+            }
             _btnScan.IsEnabled = !on;
             _btnRepair.IsEnabled = !on;
             PaintButton(_btnScan, false, on);

@@ -90,6 +90,9 @@ namespace DllFix.Ui
     // ── 引擎 ────────────────────────────────────────────────────────────────
     public static class CleanEngine
     {
+        /// <summary>取消标志（清理 / 迁移共用）</summary>
+        public static volatile bool CancelRequested;
+
         public static string FormatSize(long bytes)
         {
             if (bytes >= 1073741824L) return string.Format("{0:0.00} GB", bytes / 1073741824.0);
@@ -211,6 +214,11 @@ namespace DllFix.Ui
             foreach (CleanItem it in list)
             {
                 if (!it.Selected) continue;
+                if (CancelRequested)
+                {
+                    if (log != null) log("已停止清理（剩余项未处理）");
+                    break;
+                }
                 idx++;
                 if (progress != null) progress(0, "正在清理：" + it.Name);
 
@@ -355,8 +363,10 @@ namespace DllFix.Ui
 
                 List<string> files = new List<string>();
                 try { files.AddRange(Directory.GetFiles(cur)); } catch { }
+                if (CancelRequested) return freed;
                 foreach (string f in files)
                 {
+                    if (CancelRequested) return freed;
                     try
                     {
                         long len = new FileInfo(f).Length;
@@ -461,7 +471,10 @@ namespace DllFix.Ui
                 Directory.CreateDirectory(targetRoot);
                 if (progress != null) progress(5, "正在复制：" + Path.GetFileName(src));
 
-                string robolog = RunRobocopy(src + "\\", dst + "\\", "/E /MOVE /R:1 /W:1 /NFL /NDL /NJH /NJS /NP", 5, 85, progress);
+                string robolog = RunRobocopy(src + "\\", dst + "\\", "/E /MOVE /R:1 /W:1 /NFL /NDL /NJH /NJS /NP",
+                    item.Bytes, 5, 85, progress);
+                if (CancelRequested)
+                    return "已取消（目标目录可能残留部分文件，请手动确认）";
                 if (!Directory.Exists(dst))
                     return "复制失败：" + Short(robolog);
 
@@ -473,7 +486,7 @@ namespace DllFix.Ui
                 if (!Directory.Exists(src))
                 {
                     // 尝试回滚
-                    RunRobocopy(dst + "\\", src + "\\", "/E /MOVE /R:1 /W:1 /NFL /NDL /NJH /NJS /NP", 0, 0, null);
+                    RunRobocopy(dst + "\\", src + "\\", "/E /MOVE /R:1 /W:1 /NFL /NDL /NJH /NJS /NP", 0, 0, 0, null);
                     return "创建联接失败，已尝试回滚：" + Short(linkLog);
                 }
 
@@ -490,25 +503,80 @@ namespace DllFix.Ui
             }
         }
 
-        private static string RunRobocopy(string src, string dst, string args, int from, int to, Action<int, string> progress)
+        private static string RunRobocopy(string src, string dst, string args, long totalBytes, int from, int to,
+                                          Action<int, string> progress)
         {
             ProcessStartInfo psi = new ProcessStartInfo("robocopy", "\"" + src + "\" \"" + dst + "\" " + args);
             psi.UseShellExecute = false;
             psi.CreateNoWindow = true;
             psi.RedirectStandardOutput = true;
             psi.RedirectStandardError = true;
+
             StringBuilder sb = new StringBuilder();
             using (Process p = Process.Start(psi))
             {
-                string line;
-                while ((line = p.StandardOutput.ReadLine()) != null)
+                Thread tOut = new Thread(delegate()
                 {
-                    sb.AppendLine(line);
+                    try
+                    {
+                        string line;
+                        while ((line = p.StandardOutput.ReadLine()) != null) sb.AppendLine(line);
+                    }
+                    catch { }
+                });
+                tOut.IsBackground = true;
+                tOut.Start();
+
+                long total = totalBytes > 0 ? totalBytes : 1;
+                while (!p.HasExited)
+                {
+                    if (CancelRequested)
+                    {
+                        try { p.Kill(); } catch { }
+                        break;
+                    }
+                    long cur = DirSize(dst);
+                    int pct = from + (int)((to - from) * (double)cur / total);
+                    if (pct > to) pct = to;
+                    if (progress != null)
+                        progress(pct, "复制中 " + FormatSize(cur) + " / " + FormatSize(totalBytes));
+                    Thread.Sleep(600);
                 }
-                p.WaitForExit(1000 * 60 * 30);
+                try { p.WaitForExit(8000); } catch { }
             }
             if (progress != null) progress(to, "复制完成");
             return sb.ToString();
+        }
+
+        /// <summary>快速统计目录大小（用于迁移进度）</summary>
+        private static long DirSize(string dir)
+        {
+            long total = 0;
+            try
+            {
+                Stack<string> st = new Stack<string>();
+                st.Push(dir);
+                int guard = 0;
+                while (st.Count > 0 && guard++ < 20000)
+                {
+                    string cur = st.Pop();
+                    try
+                    {
+                        foreach (string f in Directory.EnumerateFiles(cur))
+                        {
+                            try { total += new FileInfo(f).Length; } catch { }
+                        }
+                        foreach (string d in Directory.EnumerateDirectories(cur))
+                        {
+                            if (IsJunction(d)) continue;
+                            st.Push(d);
+                        }
+                    }
+                    catch { }
+                }
+            }
+            catch { }
+            return total;
         }
 
         private static string RunCmd(string args)
@@ -647,6 +715,7 @@ namespace DllFix.Ui
         private readonly Button _btnFolder = new Button();
         private readonly Button _btnScan = new Button();
         private readonly Button _btnAction = new Button();
+        private readonly Button _btnStop = new Button();
         private readonly TextBox _target = new TextBox();
         private readonly TextBlock _targetLabel = new TextBlock();
         private readonly TextBlock _statFree = new TextBlock();
@@ -796,8 +865,17 @@ namespace DllFix.Ui
             StyleBtn(_btnAction, "立即清理", true);
             _btnScan.Click += delegate { BeginScan(); };
             _btnAction.Click += delegate { DoAction(); };
+            StyleBtn(_btnStop, "停止", false);
+            _btnStop.Visibility = Visibility.Collapsed;
+            _btnStop.Click += delegate
+            {
+                CleanEngine.CancelRequested = true;
+                _btnStop.IsEnabled = false;
+                Report("正在停止…", 0, true);
+            };
             acts.Children.Add(_btnScan);
             acts.Children.Add(_btnAction);
+            acts.Children.Add(_btnStop);
             Grid.SetColumn(acts, 2);
             bar.Children.Add(acts);
             g.Children.Add(bar);
@@ -827,7 +905,7 @@ namespace DllFix.Ui
             _bar.Minimum = 0;
             _bar.Maximum = 100;
             _bar.Value = 0;
-            _bar.Foreground = Theme.PrimarySoft;
+            _bar.Foreground = Theme.Primary;
             _bar.Background = new SolidColorBrush(Color.FromRgb(0xE6, 0xEC, 0xF6));
             _bar.BorderThickness = new Thickness(0);
             _bar.VerticalAlignment = VerticalAlignment.Center;
@@ -1137,6 +1215,11 @@ namespace DllFix.Ui
             _btnAction.IsEnabled = !on;
             _btnCache.IsEnabled = !on;
             _btnFolder.IsEnabled = !on;
+            if (_btnStop != null)
+            {
+                _btnStop.Visibility = on ? Visibility.Visible : Visibility.Collapsed;
+                _btnStop.IsEnabled = on;
+            }
         }
 
         // ── 执行 ────────────────────────────────────────────────────────────
@@ -1159,6 +1242,7 @@ namespace DllFix.Ui
                     "确认清理", MessageBoxButton.YesNo, MessageBoxImage.Question);
                 if (r != MessageBoxResult.Yes) return;
 
+                CleanEngine.CancelRequested = false;
                 EnterBusy(true);
                 Report("正在清理…", 0, true);
                 Thread t = new Thread(delegate()
@@ -1214,6 +1298,7 @@ namespace DllFix.Ui
                 "确认迁移", MessageBoxButton.YesNo, MessageBoxImage.Warning);
             if (r2 != MessageBoxResult.Yes) return;
 
+            CleanEngine.CancelRequested = false;
             EnterBusy(true);
             Report("正在迁移…", 0, true);
             Thread t2 = new Thread(delegate()

@@ -55,6 +55,53 @@ namespace DllFix
                 return pv.Run(dlg);
             }
 
+            // 自检：--clean-cancel-test 验证清理能中断（沙盒目录，不动真实数据）
+            if (args != null && args.Length >= 1 && args[0] == "--clean-cancel-test")
+            {
+                string sandbox = Path.Combine(Path.GetTempPath(), "DllSmithCancelTest");
+                try { Directory.Delete(sandbox, true); } catch { }
+                Directory.CreateDirectory(sandbox);
+                for (int i = 0; i < 40; i++)
+                {
+                    string sub = Path.Combine(sandbox, "d" + i);
+                    Directory.CreateDirectory(sub);
+                    for (int j = 0; j < 200; j++)
+                        File.WriteAllText(Path.Combine(sub, "f" + j + ".tmp"), new string('x', 4096));
+                }
+                int before = Directory.GetFiles(sandbox, "*", SearchOption.AllDirectories).Length;
+
+                CleanItem it = new CleanItem();
+                it.Name = "沙盒取消测试";
+                it.Path = sandbox;
+                it.Files = before;
+                it.Selected = true;
+
+                CleanEngine.CancelRequested = false;
+                Thread t2 = new Thread(delegate()
+                {
+                    Thread.Sleep(120);
+                    CleanEngine.CancelRequested = true;
+                });
+                t2.IsBackground = true;
+                t2.Start();
+
+                List<CleanItem> one = new List<CleanItem>();
+                one.Add(it);
+                long freed = CleanEngine.CleanCaches(one, null, null);
+                bool cancelled = CleanEngine.CancelRequested;
+                CleanEngine.CancelRequested = false;
+
+                int after = 0;
+                try { after = Directory.GetFiles(sandbox, "*", SearchOption.AllDirectories).Length; } catch { }
+
+                string msg = string.Format("before={0} after={1} freed={2}KB cancelFlag={3} stoppedEarly={4}",
+                    before, after, freed / 1024, cancelled, after > 0);
+                Console.WriteLine(msg);
+                File.WriteAllText(Path.Combine(Paths.LogDir, "clean-cancel-test.txt"), msg);
+                try { Directory.Delete(sandbox, true); } catch { }
+                return 0;
+            }
+
             // 自检：--scan-report <outFile> 扫描并输出每个条目的判定（核对"哪些会被修复"）
             if (args != null && args.Length >= 2 && args[0] == "--scan-report")
             {
