@@ -253,8 +253,9 @@ namespace DllFix.Ui
                 "System32 下常见系统组件完整性", 3,
                 delegate { return Catalog.LoadSystemDll(Environment.Is64BitOperatingSystem); });
 
+            // P0 修复：原来是 4，与「系统文件下载」共用 ScanStore key=4 -> 页面互相覆盖结果
             AddSection(host, "系统文件", "\uE896",
-                "DownLevel API 集（api-ms-win-*）", 4,
+                "DownLevel API 集（api-ms-win-*）", 6,
                 delegate { return Catalog.LoadRuntime("DownLevel", "downlevel", Environment.Is64BitOperatingSystem); });
 
             AddSection(host, "C 盘清理", "\uEDA2",
@@ -395,6 +396,11 @@ namespace DllFix.Ui
             s.List.ItemTemplate = RowTemplate();
             s.List.ItemContainerStyle = RowStyle();
             s.List.Resources.Add(typeof(System.Windows.Controls.Primitives.ScrollBar), ScrollBarStyle());
+            System.Windows.Controls.VirtualizingPanel.SetIsVirtualizing(s.List, true);
+            System.Windows.Controls.VirtualizingPanel.SetVirtualizationMode(
+                s.List, System.Windows.Controls.VirtualizationMode.Recycling);
+            System.Windows.Controls.VirtualizingPanel.SetScrollUnit(
+                s.List, System.Windows.Controls.ScrollUnit.Pixel);
             sp.Children.Add(s.List);
 
             card.Child = sp;

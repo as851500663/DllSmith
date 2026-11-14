@@ -64,7 +64,20 @@ namespace DllFix.Ui
         public string Path { get; set; }
         public long Bytes { get; set; }
         public int Files { get; set; }
-        public bool Selected { get; set; }
+        private bool _selected;
+
+        /// <summary>勾选状态：必须 Raise，否则"已选择"卡片不刷新（P1）</summary>
+        public bool Selected
+        {
+            get { return _selected; }
+            set
+            {
+                if (_selected == value) return;
+                _selected = value;
+                Raise("Selected");
+            }
+        }
+
         public CleanKind Kind { get; set; }
         /// <summary>所属磁盘根目录（回收站项用，如 C:\）</summary>
         public string Drive { get; set; }
@@ -138,6 +151,7 @@ namespace DllFix.Ui
 
             foreach (string[] d in defs)
             {
+                if (CancelRequested) break;          // 停止按钮对扫描生效
                 string[] roots = new string[d.Length - 3];
                 for (int i = 3; i < d.Length; i++) roots[i - 3] = d[i];
                 Add(list, log, d[0], d[1], roots, d[2] == "1");
@@ -207,6 +221,7 @@ namespace DllFix.Ui
             int guard = 0;
             while (stack.Count > 0 && guard++ < 200000)
             {
+                if (CancelRequested) return;
                 string cur = stack.Pop();
                 try
                 {
@@ -305,7 +320,7 @@ namespace DllFix.Ui
                         File.Delete(path);
                         freed += len;
                     }
-                    catch (Exception ex) { if (log != null) log("跳过（占用）：" + Path.GetFileName(path)); }
+                    catch (Exception) { if (log != null) log("跳过（占用）：" + Path.GetFileName(path)); }
                     return freed;
                 }
                 if (!Directory.Exists(path)) return 0;
@@ -362,11 +377,13 @@ namespace DllFix.Ui
             "\\google\\chrome\\user data", "\\tencent", "\\appdata\\local\\temp"
         };
 
+        /// <summary>
+        /// 白名单判定（A-05）：全部交给 PathGuard —— 先 GetFullPath 规范化，再做**前缀精确匹配**
+        /// （原来的 Contains 子串匹配会把 C:\Windows\TempX 之类误判为允许），并逐级判重解析点。
+        /// </summary>
         private static bool IsAllowed(string path)
         {
-            string p = (path ?? "").ToLowerInvariant();
-            foreach (string r in AllowedRoots) if (p.Contains(r)) return true;
-            return false;
+            return PathGuard.CheckCleanRoot(path) == null;
         }
 
         /// <summary>删除目录内容（保留目录本身）：迭代遍历、跳过联接、单文件失败只记录不中断</summary>
@@ -410,7 +427,8 @@ namespace DllFix.Ui
                 try { subs.AddRange(Directory.GetDirectories(cur)); } catch { }
                 foreach (string d in subs)
                 {
-                    if (IsJunction(d)) continue;
+                    if (IsJunction(d)) continue;     // 不跟随目录联接（防越界删除）
+                    if (!IsAllowed(d)) continue;     // 每级都做前缀 + 重解析点校验
                     pending.Push(d);
                 }
             }
@@ -447,6 +465,7 @@ namespace DllFix.Ui
             int idx = 0;
             foreach (string dir in candidates)
             {
+                if (CancelRequested) break;          // 停止按钮对扫描生效
                 idx++;
                 if (progress != null)
                     progress((int)(idx * 100.0 / Math.Max(1, candidates.Count)), "正在统计：" + Path.GetFileName(dir));
@@ -512,7 +531,9 @@ namespace DllFix.Ui
                 Directory.CreateDirectory(targetRoot);
                 if (progress != null) progress(5, "正在复制：" + Path.GetFileName(src));
 
-                string robolog = RunRobocopy(src + "\\", dst + "\\", "/E /MOVE /R:1 /W:1 /NFL /NDL /NJH /NJS /NP",
+                // 注意：源/目标路径**不能带尾部反斜杠** —— 拼进带引号的参数里会把引号转义掉，
+                // robocopy 收到残缺参数后直接 exit=16（原实现迁移 100% 失败）。
+                string robolog = RunRobocopy(src, dst, "/E /MOVE /R:1 /W:1 /NFL /NDL /NJH /NJS /NP",
                     item.Bytes, 5, 85, progress);
                 if (CancelRequested)
                     return "已取消（目标目录可能残留部分文件，请手动确认）";
@@ -523,12 +544,14 @@ namespace DllFix.Ui
                 if (Directory.Exists(src) && Directory.GetFileSystemEntries(src).Length > 0)
                     return "源目录仍有残留文件，未创建联接";
 
-                string linkLog = RunCmd("mklink /J \"" + src + "\" \"" + dst + "\"");
-                if (!Directory.Exists(src))
+                // 原生 API 建联接（不经 cmd /c 拼接，A-06）；用 CreateSymbolicLink(Directory)
+                string linkErr = Junction.Create(src, dst);
+                // 成功判定必须"真的是联接"，不能只看源目录存在（原来 mklink 失败也走成功分支，P0）
+                bool linked = Directory.Exists(src) && IsJunction(src);
+                if (!linked)
                 {
-                    // 尝试回滚
-                    RunRobocopy(dst + "\\", src + "\\", "/E /MOVE /R:1 /W:1 /NFL /NDL /NJH /NJS /NP", 0, 0, 0, null);
-                    return "创建联接失败，已尝试回滚：" + Short(linkLog);
+                    RunRobocopy(dst, src, "/E /MOVE /R:1 /W:1 /NFL /NDL /NJH /NJS /NP", 0, 0, 0, null);
+                    return "创建联接失败，已尝试回滚：" + Short(linkErr);
                 }
 
                 if (progress != null) progress(100, "完成");
@@ -544,10 +567,20 @@ namespace DllFix.Ui
             }
         }
 
+        /// <summary>系统自带 robocopy 的绝对路径（防 PATH 劫持，A-06）</summary>
+        public static string RobocopyExe()
+        {
+            string win = Environment.GetFolderPath(Environment.SpecialFolder.Windows);
+            string p = Path.Combine(win, "System32", "Robocopy.exe");
+            return File.Exists(p) ? p : Path.Combine(win, "Sysnative", "Robocopy.exe");
+        }
+
         private static string RunRobocopy(string src, string dst, string args, long totalBytes, int from, int to,
                                           Action<int, string> progress)
         {
-            ProcessStartInfo psi = new ProcessStartInfo("robocopy", "\"" + src + "\" \"" + dst + "\" " + args);
+            ProcessStartInfo psi = new ProcessStartInfo(RobocopyExe());
+            // 参数化：Quote 会拒绝含引号/换行的路径，并去掉尾部反斜杠（尾部反斜杠会把结尾引号转义掉 → exit=16）
+            psi.Arguments = ProcArgs.Quote(src) + " " + ProcArgs.Quote(dst) + " " + args;
             psi.UseShellExecute = false;
             psi.CreateNoWindow = true;
             psi.RedirectStandardOutput = true;
@@ -620,18 +653,38 @@ namespace DllFix.Ui
             return total;
         }
 
-        private static string RunCmd(string args)
+        /// <summary>该清理项是否落在需要管理员权限的位置（Windows 目录 / 回收站）</summary>
+        public static bool NeedsElevation(CleanItem it)
         {
-            ProcessStartInfo psi = new ProcessStartInfo("cmd.exe", "/c " + args);
-            psi.UseShellExecute = false;
-            psi.CreateNoWindow = true;
-            psi.RedirectStandardOutput = true;
-            psi.RedirectStandardError = true;
-            using (Process p = Process.Start(psi))
+            if (it == null) return false;
+            if (it.Name != null && it.Name.StartsWith("回收站", StringComparison.Ordinal)) return true;
+            string win = Environment.GetFolderPath(Environment.SpecialFolder.Windows);
+            if (string.IsNullOrEmpty(win) || string.IsNullOrEmpty(it.Path)) return false;
+            foreach (string p in it.Path.Split(new string[] { " ; " }, StringSplitOptions.RemoveEmptyEntries))
             {
-                string o = p.StandardOutput.ReadToEnd() + p.StandardError.ReadToEnd();
-                p.WaitForExit(30000);
-                return o;
+                string full = PathGuard.Normalize(p);
+                if (full.Length == 0) continue;
+                if (full.StartsWith(win, StringComparison.OrdinalIgnoreCase)) return true;
+            }
+            return false;
+        }
+
+        /// <summary>以管理员身份重启（清理页用；与系统 DLL 页同一套逻辑）</summary>
+        public static void RelaunchElevated()
+        {
+            try
+            {
+                string exe = System.Reflection.Assembly.GetEntryAssembly().Location;
+                System.Diagnostics.ProcessStartInfo psi = new System.Diagnostics.ProcessStartInfo(exe);
+                psi.UseShellExecute = true;
+                psi.Verb = "runas";
+                System.Diagnostics.Process.Start(psi);
+                Application.Current.Shutdown();
+            }
+            catch (Exception ex)
+            {
+                Log.Error("clean elevate failed", ex);
+                Dlg.Error("提权失败", ex.Message);
             }
         }
 
@@ -1299,6 +1352,24 @@ namespace DllFix.Ui
         private void DoAction()
         {
             if (_busy) return;
+
+            // F2（评审）：非管理员清理系统目录会得到"释放 0 B"的假成功，先判权限并给出两个出口
+            if (!SystemProbe.IsElevated && _mode == 0)
+            {
+                int needAdmin = 0;
+                foreach (CleanItem c in _items)
+                    if (c.Selected && CleanEngine.NeedsElevation(c)) needAdmin++;
+                if (needAdmin > 0)
+                {
+                    if (Dlg.Confirm(Str.NeedAdminTitle, Str.F(Str.NeedAdminCleanBody, needAdmin)))
+                    {
+                        CleanEngine.RelaunchElevated();
+                        return;
+                    }
+                    // 用户选"继续"：明确告知会跳过哪些项
+                    Report(string.Format("未提权：将跳过 {0} 个需要管理员权限的项", needAdmin), 0, false);
+                }
+            }
             List<CleanItem> picked = _items.Where(delegate(CleanItem i) { return i.Selected; }).ToList();
             if (picked.Count == 0)
             {
@@ -1348,6 +1419,12 @@ namespace DllFix.Ui
                             long freeNow = CleanEngine.DiskFree();
                             long delta = freeNow - freeBeforeAction;
                             Report("清理完成，释放 " + CleanEngine.FormatSize(freedFinal), 0, false);
+                            if (freedFinal <= 0)
+                            {
+                                // 释放 0 B 必须解释原因，不能给"成功"的假象
+                                Dlg.Info("没有可释放的内容", Str.FreedZero);
+                                return;
+                            }
                             Dlg.Info("清理完成", string.Format("统计释放：{0}\nC 盘可用：{1} → {2}（实际 +{3}）\n\n详情见日志面板。",
                                 CleanEngine.FormatSize(freedFinal),
                                 CleanEngine.FormatSize(freeBeforeAction),
@@ -1359,6 +1436,17 @@ namespace DllFix.Ui
                 });
                 t.IsBackground = true;
                 t.Start();
+                return;
+            }
+
+            // 迁移：建立目录联接需要管理员权限，非提权直接给出口，避免"显示已迁移但没建联接"
+            if (!SystemProbe.IsElevated)
+            {
+                if (Dlg.Confirm(Str.NeedAdminTitle,
+                    "迁移并建立目录联接需要管理员权限。\n\n确定 = 以管理员身份重新启动\n取消 = 放弃本次迁移"))
+                {
+                    CleanEngine.RelaunchElevated();
+                }
                 return;
             }
 

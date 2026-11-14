@@ -1,0 +1,28 @@
+; DllSmith 隐私说明（1.4.0）
+; 随安装包一起发布：installer\privacy.txt -> {app}\privacy.txt
+
+一、我们收集什么
+1. 匿名在线统计（可在 config.json 里 "telemetry": false 关闭）
+   - 安装标识：MachineGuid + 固定盐的 SHA-256 前 16 位（不可逆，不能还原成设备信息）
+   - 客户端版本号
+2. 不收集：用户名、邮箱、文件内容、扫描结果明细、DLL 列表、路径。
+
+二、网络请求都发往哪里
+1. 目录 / 更新服务：https://123.57.94.141:9443（1.4.0 起强制 HTTPS，
+   并对发布方自签根证书做公钥 pinning；证书不匹配即拒绝连接）
+2. 修复文件下载：优先走目录服务下发的 oss_key（厂商 OSS），
+   历史 CDN 地址仅作兜底；下载内容会按签名清单里的 sha256 校验后才落盘。
+
+三、目录数据为什么可信
+1. 目录清单（manifest）由发布方用 RSA-3072 私钥签名（RSASSA-PKCS1-v1_5 / SHA-256）；
+2. 客户端内置发布公钥，验签失败即把该页切换为"只读"（可扫描、不可修复）；
+3. 清单覆盖全部条目（含每条的 FILEPATH / DOWNLOAD），被篡改任一字段都会验签失败。
+
+四、本地会写什么
+1. Logs\：运行日志（已脱敏：不记录完整 URL 参数与原始 MachineGuid）
+2. Documents\DllRepair\Download\：修复文件缓存（按内容哈希命名并校验）
+3. Logs\rebuild-backups.json + <目标文件>.rebuild.bak：覆盖前的原文件留档，可一键还原
+
+五、如何关闭统计
+编辑程序目录下的 config.json，加一行：
+    "telemetry": false

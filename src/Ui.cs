@@ -9,6 +9,7 @@
 using System;
 using System.Collections.Generic;
 using System.Collections.ObjectModel;
+using System.Text;
 using System.Linq;
 using System.Threading;
 using System.Windows;
@@ -65,6 +66,20 @@ namespace DllFix.Ui
         public static readonly Brush ArchBg = new SolidColorBrush(Color.FromRgb(0xEC, 0xF3, 0xFF));
         public static readonly Brush ArchFg = new SolidColorBrush(Color.FromRgb(0x2A, 0x6C, 0xD8));
 
+        static Theme()
+        {
+            // 冻结静态画刷：不冻结时每次绘制都可能复制，且无法走硬件缓存
+            Freeze(PageBg); Freeze(CardLine); Freeze(Primary); Freeze(PrimarySoft);
+            Freeze(TextStrong); Freeze(TextBody); Freeze(TextMuted);
+            Freeze(Ok); Freeze(OkBg); Freeze(Warn); Freeze(WarnBg);
+            Freeze(ArchBg); Freeze(ArchFg);
+        }
+
+        private static void Freeze(Brush b)
+        {
+            try { if (b != null && b.CanFreeze) b.Freeze(); } catch { }
+        }
+
         public static Brush Grad(Color a, Color b)
         {
             LinearGradientBrush g = new LinearGradientBrush();
@@ -89,20 +104,22 @@ namespace DllFix.Ui
 
         public MainWindow()
         {
-            Title = AppInfo.ProductName + " · " + AppInfo.ChineseName + "  v" + AppInfo.Version;
+            Title = AppInfo.ProductName + " · " + AppInfo.ChineseName + "  v" + AppInfo.Version;   // 标题保持品牌名 + 版本
             Width = 1220;
             Height = 820;
             MinWidth = 1080;
             MinHeight = 700;
             WindowStartupLocation = WindowStartupLocation.CenterScreen;
             Background = Theme.PageBg;
+            // 主窗不使用 AllowsTransparency（保持硬件合成路径）
+            AllowsTransparency = false;
             FontFamily = new FontFamily("Microsoft YaHei UI");
             FontSize = 13;
             UseLayoutRounding = true;
 
             BuildLayout();
             ApplyIcon();
-            ShowPage(0);
+            if (!Diag.Has("nopage")) ShowPage(0);
             CheckUpdateAsync();
             StartHeartbeat();
         }
@@ -157,52 +174,109 @@ namespace DllFix.Ui
             };
         }
 
+        /// <summary>
+        /// 更新提示（发布门禁）：
+        ///   ① 记录未通过验签/HTTPS 校验 -> 只告知，不下载不安装；
+        ///   ② 非强制 -> 用户点「取消」什么都不做（原实现丢弃 Dlg.Confirm 返回值，取消也装）；
+        ///   ③ 强制 -> 只给「立即更新 / 退出程序」两个出口，不静默安装。
+        /// </summary>
         private void PromptUpdate(UpdateInfo info)
         {
+            if (info == null) return;
+
+            if (!info.Trusted)
+            {
+                Log.Error("update rejected: " + info.RejectReason, null);
+                Dlg.Error("更新记录未通过校验",
+                    info.RejectReason + "\n\n为保证安全，本次更新已中止：不会下载、不会运行任何文件。\n详情见 Logs\\ 目录。");
+                return;
+            }
+
             string notes = string.IsNullOrEmpty(info.Notes) ? "（无更新说明）" : info.Notes;
+            string body = "检测到新版本 " + info.Version + "（当前 v" + AppInfo.Version + "）。\n\n" + notes;
 
-            // 强制更新：没有"跳过"，只能更新或退出
-            Dlg.Confirm("需要更新", "检测到新版本 " + info.Version + "，当前版本 v" + AppInfo.Version
-                + " 已停止支持。\n\n" + notes + "\n\n点击「确定」开始更新，更新过程中请勿关闭程序。");
+            if (info.Mandatory)
+            {
+                bool go = Dlg.Choose("必须更新",
+                    body + "\n\n当前版本已停止支持，需更新后继续使用。",
+                    "立即更新", "退出程序");
+                if (!go)
+                {
+                    Log.Info("mandatory update declined -> exit");
+                    Application.Current.Shutdown();
+                    return;
+                }
+            }
+            else
+            {
+                bool go = Dlg.Confirm("发现新版本", body + "\n\n现在更新吗？");
+                if (!go)
+                {
+                    Log.Info("optional update cancelled by user");
+                    return;                       // 取消 = 不下载、不安装、不退出
+                }
+            }
 
-            // 确定后弹出下载进度窗（百分比 + 进度条），下载完自动启动安装包
+            RunUpdate(info);
+        }
+
+        /// <summary>下载（已验签 + 已过 https 检查）-> 校验 SHA256 -> 启动安装包</summary>
+        private void RunUpdate(UpdateInfo info)
+        {
             UpdateDialog dlg = new UpdateDialog(info);
             dlg.Owner = this;
             dlg.Show();
 
+            CancellationTokenSource cts = new CancellationTokenSource();
+            bool mandatory = info.Mandatory;
+
             Thread t = new Thread(delegate()
             {
-                bool ok = UpdateService.Download(info, delegate(int pct, long got, long total)
+                bool ok = false;
+                try
                 {
-                    dlg.Dispatcher.BeginInvoke(new Action(delegate { dlg.SetProgress(pct, got, total); }));
-                });
-
-                dlg.Dispatcher.BeginInvoke(new Action(delegate
-                {
-                    if (!ok)
+                    ok = UpdateService.Download(info, delegate(int pct, long got, long total)
                     {
-                        dlg.Close();
-                        Dlg.Error("更新失败", "更新包下载或 SHA256 校验失败，请联系管理员（详情见 Logs）。");
-                        Application.Current.Shutdown();
-                        return;
+                        try
+                        {
+                            dlg.Dispatcher.BeginInvoke(new Action(delegate { dlg.SetProgress(pct, got, total); }));
+                        }
+                        catch { }
+                    }, cts.Token);
+                }
+                catch (Exception ex) { Log.Error("update download crashed", ex); }
+
+                bool started = false;
+                if (ok)
+                {
+                    try
+                    {
+                        dlg.Dispatcher.BeginInvoke(new Action(delegate
+                        { dlg.SetStatus("下载完成，正在校验并启动安装程序…"); }));
                     }
-                    dlg.SetStatus("下载完成，正在启动安装程序…");
-                    UpdateService.RunInstaller(info);
-                    Application.Current.Shutdown();
-                }));
+                    catch { }
+                    started = UpdateService.RunInstaller(info);
+                }
+
+                try
+                {
+                    dlg.Dispatcher.BeginInvoke(new Action(delegate
+                    {
+                        try { dlg.Close(); } catch { }
+                        if (!ok || !started)
+                        {
+                            Dlg.Error("更新失败",
+                                "更新包下载、签名/哈希校验或启动失败，已中止更新（未运行任何安装程序）。\n详情见 Logs\\ 目录。");
+                            if (mandatory) Application.Current.Shutdown();
+                            return;
+                        }
+                        Application.Current.Shutdown();
+                    }));
+                }
+                catch { }
             });
             t.IsBackground = true;
             t.Start();
-        }
-
-        private void ApplyUpdate(UpdateInfo info)
-        {
-            if (!UpdateService.DownloadAndRun(info))
-            {
-                Dlg.Error("更新失败", "更新包下载或 SHA256 校验失败，详情见 Logs。");
-                return;
-            }
-            Application.Current.Shutdown();
         }
 
         private void BuildLayout()
@@ -212,21 +286,21 @@ namespace DllFix.Ui
             root.RowDefinitions.Add(new RowDefinition());
             root.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
             root.Background = Theme.PageBg;
-            root.Children.Add(BuildBanner());
+            if (!Diag.Has("nobanner")) root.Children.Add(BuildBanner());
 
             Grid body = new Grid();
             body.Margin = new Thickness(20, 16, 20, 0);
             body.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(224) });
             body.ColumnDefinitions.Add(new ColumnDefinition());
-            body.Children.Add(BuildNav());
+            if (!Diag.Has("nonav")) body.Children.Add(BuildNav());
             _host.Margin = new Thickness(16, 0, 0, 0);
             Grid.SetColumn(_host, 1);
             body.Children.Add(_host);
             Grid.SetRow(body, 1);
             root.Children.Add(body);
 
-            root.Children.Add(BuildFooter());
-            Grid.SetRow(root.Children[2], 2);
+            if (!Diag.Has("nofooter")) root.Children.Add(BuildFooter());
+            if (root.Children.Count > 2) Grid.SetRow(root.Children[root.Children.Count - 1], 2);
             Content = root;
         }
 
@@ -281,12 +355,12 @@ namespace DllFix.Ui
 
             StackPanel mid = new StackPanel { Margin = new Thickness(48, 0, 20, 0), VerticalAlignment = VerticalAlignment.Center };
             TextBlock h = new TextBlock();
-            h.Text = "电脑系统修复与 DLL 修复工具";
+            h.Text = Str.MainTitle;
             h.FontSize = 27;
             h.FontWeight = FontWeights.Bold;
             h.Foreground = Theme.TextStrong;
             TextBlock d = new TextBlock();
-            d.Text = "一键检测并修复系统运行库、DirectX、系统 DLL 等常见问题，\n让电脑运行更稳定、更流畅。";
+            d.Text = Str.MainSubtitle;
             d.FontSize = 13;
             d.Foreground = Theme.TextMuted;
             d.Margin = new Thickness(0, 8, 0, 0);
@@ -305,7 +379,7 @@ namespace DllFix.Ui
             ver.Foreground = Theme.TextMuted;
             ver.HorizontalAlignment = HorizontalAlignment.Right;
             TextBlock repo = new TextBlock();
-            repo.Text = "GitHub 开源项目";
+            repo.Text = Str.GitHubProject;
             repo.FontSize = 12;
             repo.Foreground = new SolidColorBrush(Color.FromRgb(0x8B, 0x9B, 0xB0));
             repo.Margin = new Thickness(0, 6, 0, 0);
@@ -313,7 +387,7 @@ namespace DllFix.Ui
 
             // 访问官网
             Button site = new Button();
-            site.Content = "访问官网  ↗";
+            site.Content = Str.VisitSite;
             site.FontSize = 12.5;
             site.Height = 30;
             site.Padding = new Thickness(14, 0, 14, 0);
@@ -375,8 +449,9 @@ namespace DllFix.Ui
             card.Padding = new Thickness(12, 16, 12, 16);
 
             StackPanel sp = new StackPanel();
-            string[] labels = { "全面体检", "运行库修复", "DirectX 修复", "系统 DLL 修复", "系统文件下载", "C 盘清理" };
-            string[] glyphs = { "\uE80F", "\uE74C", "\uE7FC", "\uE8A5", "\uE896", "\uEDA2" };
+            string[] labels = { Str.NavOverview, Str.NavRuntime, Str.NavDirectX, Str.NavSystemDll,
+                                Str.NavDownLevel, Str.NavDownload, Str.NavClean };
+            string[] glyphs = { "\uE80F", "\uE74C", "\uE7FC", "\uE8A5", "\uE8A5", "\uE896", "\uEDA2" };
 
             for (int i = 0; i < labels.Length; i++)
             {
@@ -443,8 +518,7 @@ namespace DllFix.Ui
             switch (index)
             {
                 case 1:
-                    page = new ScanPage("运行库修复", glyphs[1],
-                        "检测并修复 Microsoft Visual C++ 运行库，解决程序无法启动、缺少 DLL 等问题。",
+                    page = new ScanPage(Str.NavRuntime, glyphs[1], Str.DescRuntime,
                         delegate
                         {
                             List<CatalogItem> l = Catalog.LoadRuntime("运行库", "VC_Scan", Environment.Is64BitOperatingSystem);
@@ -454,8 +528,7 @@ namespace DllFix.Ui
                         }, false, 1);
                     break;
                 case 2:
-                    page = new ScanPage("DirectX 修复", glyphs[2],
-                        "修复 DirectX 组件缺失或损坏导致的游戏报错、画面异常问题。",
+                    page = new ScanPage(Str.NavDirectX, glyphs[2], Str.DescDirectX,
                         delegate
                         {
                             List<CatalogItem> l = Catalog.LoadRuntime("DirectX", "DirectX", Environment.Is64BitOperatingSystem);
@@ -464,13 +537,15 @@ namespace DllFix.Ui
                         }, false, 2);
                     break;
                 case 3:
-                    page = new ScanPage("系统 DLL 修复", glyphs[3],
-                        "解决运行游戏或打开应用时提示 DLL 文件缺失或损坏的问题。",
+                    page = new ScanPage(Str.NavSystemDll, glyphs[3], Str.DescSystemDll,
                         delegate { return Catalog.LoadSystemDll(Environment.Is64BitOperatingSystem); }, false, 3);
                     break;
+                case 6:
+                    page = new ScanPage(Str.NavDownLevel, glyphs[4], Str.DescDownLevel,
+                        delegate { return Catalog.LoadRuntime("DownLevel", "downlevel", Environment.Is64BitOperatingSystem); }, false, 6);
+                    break;
                 case 4:
-                    page = new ScanPage("系统文件下载", glyphs[4],
-                        "从镜像源下载系统文件与运行库安装包（仅下载，不安装）。",
+                    page = new ScanPage(Str.NavDownload, glyphs[5], Str.DescDownload,
                         delegate { return Catalog.LoadSystemDll(Environment.Is64BitOperatingSystem); }, true, 4);
                     break;
                 case 5:
@@ -535,7 +610,7 @@ namespace DllFix.Ui
             info.Foreground = Theme.Primary;
             info.Margin = new Thickness(0, 0, 8, 0);
             info.VerticalAlignment = VerticalAlignment.Center;
-            _status.Text = "就绪";
+            _status.Text = Str.Ready;
             _status.FontSize = 13;
             _status.Foreground = Theme.TextBody;
             _status.VerticalAlignment = VerticalAlignment.Center;
@@ -557,9 +632,12 @@ namespace DllFix.Ui
             arc.RenderTransformOrigin = new Point(0.5, 0.5);
             arc.RenderTransform = _spinRot;
             _spin.Children.Add(arc);
-            DoubleAnimation spinAnim = new DoubleAnimation(0, 360, new Duration(TimeSpan.FromMilliseconds(900)));
-            spinAnim.RepeatBehavior = RepeatBehavior.Forever;
-            _spinRot.BeginAnimation(RotateTransform.AngleProperty, spinAnim);
+            if (!Diag.Has("nospin"))
+            {
+                DoubleAnimation spinAnim = new DoubleAnimation(0, 360, new Duration(TimeSpan.FromMilliseconds(900)));
+                spinAnim.RepeatBehavior = RepeatBehavior.Forever;
+                _spinRot.BeginAnimation(RotateTransform.AngleProperty, spinAnim);
+            }
             left.Children.Add(_spin);
 
             _percent.Text = "0%";
@@ -570,7 +648,30 @@ namespace DllFix.Ui
             _percent.Visibility = Visibility.Collapsed;
             left.Children.Add(_percent);
 
-            footer.Child = left;
+            // 右侧：还原被替换的文件（F1 评审 blocker：回滚必须有界面入口，与 --rollback 共用同一套逻辑）
+            Button rollback = new Button();
+            rollback.Content = Str.BtnRollback;
+            rollback.FontSize = 12.5;
+            rollback.Height = 30;
+            rollback.Padding = new Thickness(14, 0, 14, 0);
+            rollback.Cursor = System.Windows.Input.Cursors.Hand;
+            rollback.Foreground = Theme.Primary;
+            rollback.Background = new SolidColorBrush(Color.FromRgb(0xEB, 0xF3, 0xFF));
+            rollback.BorderBrush = new SolidColorBrush(Color.FromRgb(0xCF, 0xDF, 0xF7));
+            rollback.BorderThickness = new Thickness(1);
+            rollback.ToolTip = Str.RollbackHint;
+            rollback.Template = BuildPillTemplate(new CornerRadius(9));
+            rollback.Click += delegate { RollbackDialog.Show(this); };
+
+            Grid footerGrid = new Grid();
+            footerGrid.ColumnDefinitions.Add(new ColumnDefinition());
+            footerGrid.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+            footerGrid.Children.Add(left);
+            Grid.SetColumn(rollback, 1);
+            rollback.VerticalAlignment = VerticalAlignment.Center;
+            footerGrid.Children.Add(rollback);
+
+            footer.Child = footerGrid;
             return footer;
         }
     }
@@ -591,8 +692,18 @@ namespace DllFix.Ui
             WindowStartupLocation = WindowStartupLocation.CenterScreen;
             WindowStyle = WindowStyle.None;
             ResizeMode = ResizeMode.NoResize;
-            AllowsTransparency = true;
-            Background = Brushes.Transparent;
+            // 性能：不要用 AllowsTransparency（会把整个窗口变成 layered window、强制软件合成）。
+            // 自绘标题栏改用 WindowChrome，圆角交给内部卡片 Border。
+            AllowsTransparency = false;
+            Background = new SolidColorBrush(Color.FromRgb(0xF3, 0xF7, 0xFE));
+            System.Windows.Shell.WindowChrome.SetWindowChrome(this, new System.Windows.Shell.WindowChrome
+            {
+                CaptionHeight = 0,
+                ResizeBorderThickness = new Thickness(0),
+                GlassFrameThickness = new Thickness(0),
+                CornerRadius = new CornerRadius(0),
+                UseAeroCaptionButtons = false
+            });
             ShowInTaskbar = false;
             Topmost = true;
 
@@ -736,6 +847,8 @@ namespace DllFix.Ui
         private CancellationTokenSource _cts;
         private bool _busy;
         private readonly int _page = -1;
+        private CatalogTrustSet _trust = new CatalogTrustSet();
+        private ListCollectionView _view;
 
         public event Action<string, int, bool> StatusChanged;
 
@@ -760,8 +873,12 @@ namespace DllFix.Ui
                 foreach (CatalogItem it in cached) _items.Add(it);
                 ApplySort();
                 UpdateCards();
-                SetButtonText(_btnScan, "重新检查");
+                SetButtonText(_btnScan, Str.BtnRescan);
                 if (_placeholder != null) _placeholder.Visibility = Visibility.Collapsed;
+                // 载入缓存的页面同样要跑一次信任态刷新：否则"目录未校验"时会给出空白原因（F3）
+                if (_trust == null || _trust.ByKey.Count == 0)
+                    _trust = CatalogTrustSet.LoadAll(cached);
+                ApplyTrustUi();
                 Report(string.Format("已载入总览的检查结果：{0} 项", cached.Count), 0, false);
             }
 
@@ -827,11 +944,11 @@ namespace DllFix.Ui
             mid.Children.Add(cards);
 
             StackPanel actions = new StackPanel { Orientation = Orientation.Horizontal, VerticalAlignment = VerticalAlignment.Center };
-            StyleButton(_btnScan, "开始检查", false, "\uE72C");
+            StyleButton(_btnScan, Str.BtnScan, false, "\uE72C");
             _btnScan.Click += delegate { BeginScan(); };
-            StyleButton(_btnRepair, _downloadOnly ? "一键下载" : "一键修复", true, "\uE8B0");
+            StyleButton(_btnRepair, _downloadOnly ? Str.BtnDownloadOnly : Str.BtnRepair, true, "\uE8B0");
             _btnRepair.Click += delegate { BeginRepair(); };
-            StyleButton(_btnStop, "停止", false, "\uE71A");
+            StyleButton(_btnStop, Str.BtnStop, false, "\uE71A");
             _btnStop.Margin = new Thickness(8, 0, 0, 0);
             _btnStop.Visibility = Visibility.Collapsed;
             _btnStop.Click += delegate
@@ -858,7 +975,8 @@ namespace DllFix.Ui
 
             Grid table = new Grid();
             table.RowDefinitions.Add(new RowDefinition { Height = new GridLength(46) });
-            table.RowDefinitions.Add(new RowDefinition());
+            // 最小高度：日志面板展开时列表不能被压成 0（P1：1080x700 下 0 高度）
+            table.RowDefinitions.Add(new RowDefinition { MinHeight = 180 });
 
             Grid header = new Grid();
             header.Background = new SolidColorBrush(Color.FromRgb(0xF5, 0xF9, 0xFF));
@@ -867,8 +985,10 @@ namespace DllFix.Ui
             AddText(header, 1, _title == "系统 DLL 修复" || _title == "系统文件下载" ? "系统文件" : "运行库组件",
                     12.5, Theme.TextBody, true, new Thickness(8, 0, 0, 0));
             AddText(header, 2, "架构", 12.5, Theme.TextBody, true, new Thickness(8, 0, 0, 0));
-            AddText(header, 3, "版本", 12.5, Theme.TextBody, true, new Thickness(8, 0, 0, 0));
+            AddText(header, 3, IsSystemPage() ? "版本 / 目标路径" : "版本", 12.5, Theme.TextBody, true, new Thickness(8, 0, 0, 0));
             AddText(header, 4, "状态", 12.5, Theme.TextBody, true, new Thickness(8, 0, 0, 0));
+            AddText(header, 5, Str.ColumnProgress, 12.5, Theme.TextBody, true, new Thickness(8, 0, 0, 0));
+            AddText(header, 6, Str.ColumnCheck, 12.5, Theme.TextBody, true, new Thickness(8, 0, 0, 0));
             table.Children.Add(header);
 
             _list.ItemsSource = _items;
@@ -879,11 +999,16 @@ namespace DllFix.Ui
             _list.ItemTemplate = BuildRowTemplate();
             _list.ItemContainerStyle = BuildRowStyle();
             _list.Resources.Add(typeof(ScrollBar), BuildScrollBarStyle(false));
+            // 性能：容器回收 + 像素滚动（虚拟化本身没坏，但 Standard 模式会不停重建容器）
+            VirtualizingPanel.SetIsVirtualizing(_list, true);
+            VirtualizingPanel.SetVirtualizationMode(_list, VirtualizationMode.Recycling);
+            VirtualizingPanel.SetScrollUnit(_list, ScrollUnit.Pixel);
+            ScrollViewer.SetCanContentScroll(_list, true);
             Grid.SetRow(_list, 1);
             table.Children.Add(_list);
 
             _placeholder = new TextBlock();
-            _placeholder.Text = "尚未检查：点击右上角「开始检查」开始检测这一类。";
+            _placeholder.Text = Str.EmptyScan;
             _placeholder.FontSize = 13;
             _placeholder.Foreground = Theme.TextMuted;
             _placeholder.HorizontalAlignment = HorizontalAlignment.Center;
@@ -924,11 +1049,14 @@ namespace DllFix.Ui
 
         private static void BuildColumns(Grid g)
         {
+            // 必须与行模板列数一致（原来 5 列 vs 行 6 列 -> 表头与内容错位，P1）
             g.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(48) });
             g.ColumnDefinitions.Add(new ColumnDefinition());
             g.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(100) });
             g.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(150) });
             g.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(120) });
+            g.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(104) });
+            g.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(96) });
         }
 
         private static void AddCell(Grid g, int col, UIElement el)
@@ -999,18 +1127,76 @@ namespace DllFix.Ui
             return card;
         }
 
-        /// <summary>缺失置顶、正常在下，其次按名称</summary>
+        /// <summary>
+        /// 原地排序（缺失置顶 -> 正常 -> 未判定，其次按名称）。
+        /// 用 ListCollectionView.CustomSort，不再每次 new 一个 List 赋给 ItemsSource：
+        /// 换源会重建全部容器，扫描中列表还会空白（性能审计 §3）。
+        /// </summary>
         private void ApplySort()
         {
-            if (_items.Count == 0) return;
-            List<CatalogItem> sorted = new List<CatalogItem>(_items);
-            sorted.Sort(delegate(CatalogItem a, CatalogItem b)
+            if (_view == null)
             {
+                _view = CollectionViewSource.GetDefaultView(_items) as ListCollectionView;
+                if (_view != null) _view.CustomSort = new CatalogComparer();
+            }
+            if (_view != null) _view.Refresh();
+        }
+
+        private sealed class CatalogComparer : System.Collections.IComparer
+        {
+            public int Compare(object x, object y)
+            {
+                CatalogItem a = x as CatalogItem;
+                CatalogItem b = y as CatalogItem;
+                if (a == null || b == null) return 0;
                 int ra = StateRank(a), rb = StateRank(b);
                 if (ra != rb) return ra.CompareTo(rb);
                 return string.Compare(a.Name, b.Name, StringComparison.CurrentCultureIgnoreCase);
-            });
-            _list.ItemsSource = sorted;
+            }
+        }
+
+        /// <summary>本页是否系统文件类（决定第四列显示版本还是目标路径）</summary>
+        private bool IsSystemPage()
+        {
+            return _title != null && (_title.IndexOf("DLL", StringComparison.Ordinal) >= 0
+                || _title.IndexOf("系统文件", StringComparison.Ordinal) >= 0);
+        }
+
+        /// <summary>按目录信任状态刷新界面：只读时禁用修复并写明原因</summary>
+        private void ApplyTrustUi()
+        {
+            if (_btnRepair == null) return;
+            bool can = _trust != null && _trust.CanRepair;
+            _btnRepair.IsEnabled = can && !_busy;
+            if (!can && _trust != null)
+            {
+                SetButtonText(_btnRepair, "只读：目录未通过校验");
+                string reason = _trust.Reason;
+                if (string.IsNullOrEmpty(reason)) reason = Str.RecheckForTrust;   // 空原因兜底，绝不给空白
+                Report(Str.ReadOnlyBanner + reason, 0, false);
+            }
+            else
+            {
+                SetButtonText(_btnRepair, _downloadOnly ? "一键下载" : "一键修复");
+            }
+        }
+
+        /// <summary>把多 key 的信任集合适配成 RepairEngine 认的单一对象</summary>
+        private CatalogTrust MultiTrustAdapter()
+        {
+            if (_trust == null || _trust.ByKey.Count == 0) return null;
+            if (!_trust.CanRepair)
+            {
+                foreach (CatalogTrust x in _trust.ByKey.Values)
+                    if (!x.CanRepair) return x;
+            }
+            CatalogTrust probe = new CatalogTrust();
+            probe.Key = "(page)";
+            probe.State = CatalogTrustState.Trusted;
+            probe.HashedEntries = _trust.HashedEntries;
+            probe.TotalEntries = _trust.TotalEntries;
+            probe.LineCount = _trust.TotalEntries;
+            return probe;
         }
 
         private static int StateRank(CatalogItem i)
@@ -1151,6 +1337,7 @@ namespace DllFix.Ui
                 "        <ColumnDefinition Width='150'/>" +
                 "        <ColumnDefinition Width='120'/>" +
                 "        <ColumnDefinition Width='104'/>" +
+                "        <ColumnDefinition Width='96'/>" +
                 "      </Grid.ColumnDefinitions>" +
                 "      <CheckBox IsChecked='{Binding Selected, Mode=TwoWay}' HorizontalAlignment='Center' VerticalAlignment='Center'/>" +
                 "      <StackPanel Grid.Column='1' Orientation='Horizontal' Margin='8,0,12,0'>" +
@@ -1161,7 +1348,7 @@ namespace DllFix.Ui
                 "              Background='#ECF3FF' BorderBrush='#D8E7FF' BorderThickness='1'>" +
                 "        <TextBlock Text='{Binding Arch}' FontSize='11.5' Foreground='#2A6CD8'/>" +
                 "      </Border>" +
-                "      <TextBlock Grid.Column='3' Text='{Binding Version}' FontFamily='Consolas' FontSize='12.5'" +
+                "      <TextBlock Grid.Column='3' Text='{Binding InfoText}' FontFamily='Consolas' FontSize='12.5'" +
                 "                 Foreground='#5A6B80' VerticalAlignment='Center' Margin='8,0,0,0'/>" +
                 "      <StackPanel Grid.Column='5' Orientation='Horizontal' VerticalAlignment='Center'" +
                 "                  Visibility='{Binding HasPercent}'>" +
@@ -1180,11 +1367,11 @@ namespace DllFix.Ui
                 "                <Setter Property='Background' Value='#FDECEC'/>" +
                 "                <Setter Property='BorderBrush' Value='#F5C7C7'/>" +
                 "              </DataTrigger>" +
-                "              <DataTrigger Binding='{Binding StateText}' Value='下载中'>" +
+                "              <DataTrigger Binding='{Binding StateKey}' Value='downloading'>" +
                 "                <Setter Property='Background' Value='#FFF3E2'/>" +
                 "                <Setter Property='BorderBrush' Value='#F7DCB5'/>" +
                 "              </DataTrigger>" +
-                "              <DataTrigger Binding='{Binding StateText}' Value='安装中'>" +
+                "              <DataTrigger Binding='{Binding StateKey}' Value='installing'>" +
                 "                <Setter Property='Background' Value='#FFF3E2'/>" +
                 "                <Setter Property='BorderBrush' Value='#F7DCB5'/>" +
                 "              </DataTrigger>" +
@@ -1199,10 +1386,35 @@ namespace DllFix.Ui
                 "                <DataTrigger Binding='{Binding IsMissing}' Value='True'>" +
                 "                  <Setter Property='Foreground' Value='#D13B3B'/>" +
                 "                </DataTrigger>" +
-                "                <DataTrigger Binding='{Binding StateText}' Value='下载中'>" +
+                "                <DataTrigger Binding='{Binding StateKey}' Value='downloading'>" +
                 "                  <Setter Property='Foreground' Value='#B26A00'/>" +
                 "                </DataTrigger>" +
-                "                <DataTrigger Binding='{Binding StateText}' Value='安装中'>" +
+                "                <DataTrigger Binding='{Binding StateKey}' Value='installing'>" +
+                "                  <Setter Property='Foreground' Value='#B26A00'/>" +
+                "                </DataTrigger>" +
+                "              </Style.Triggers>" +
+                "            </Style>" +
+                "          </TextBlock.Style>" +
+                "        </TextBlock>" +
+                "      </Border>" +
+                "      <Border Grid.Column='6' HorizontalAlignment='Left' VerticalAlignment='Center' CornerRadius='9' Padding='9,3'" +
+                "              BorderThickness='1' BorderBrush='#CFEBD9' Background='#E9F8F0'>" +
+                "        <Border.Style>" +
+                "          <Style TargetType='Border'>" +
+                "            <Style.Triggers>" +
+                "              <DataTrigger Binding='{Binding HashCovered}' Value='False'>" +
+                "                <Setter Property='Background' Value='#FFF7E8'/>" +
+                "                <Setter Property='BorderBrush' Value='#F0D9A8'/>" +
+                "              </DataTrigger>" +
+                "            </Style.Triggers>" +
+                "          </Style>" +
+                "        </Border.Style>" +
+                "        <TextBlock Text='{Binding HashText}' FontSize='11'>" +
+                "          <TextBlock.Style>" +
+                "            <Style TargetType='TextBlock'>" +
+                "              <Setter Property='Foreground' Value='#189652'/>" +
+                "              <Style.Triggers>" +
+                "                <DataTrigger Binding='{Binding HashCovered}' Value='False'>" +
                 "                  <Setter Property='Foreground' Value='#B26A00'/>" +
                 "                </DataTrigger>" +
                 "              </Style.Triggers>" +
@@ -1341,51 +1553,86 @@ namespace DllFix.Ui
                     HashSet<string> seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
                     foreach (CatalogItem it in raw)
                     {
-                        string key = it.Category + "|" + it.Title + "|" + (it.FilePath == null ? "" : it.FilePath);
+                        // P0：原来按 Category|Title|FilePath 去重，把 VC_DLL 的 239 条折叠成 25 条。
+                        // 现在只折叠"完全同一条"（文件名 + 下载地址 + 目标路径都相同）。
+                        string key = it.Category + "|" + it.FileName + "|" + it.Download + "|" + it.FilePath;
                         if (seen.Add(key)) dedup.Add(it);
                     }
 
                     Dispatcher.BeginInvoke(new Action(delegate
                     {
                         foreach (CatalogItem it in dedup) _items.Add(it);
-                        Report(string.Format("正在检测 {0} 个条目…", dedup.Count), 0, true);
+                        Report(string.Format("正在校验目录签名…（{0} 条）", dedup.Count), 0, true);
                     }));
 
+                    // 目录信任：签名 manifest 完整性校验 + 逐条覆盖判定（页面据此决定能否修复）
+                    CatalogTrustSet trust = CatalogTrustSet.LoadAll(dedup);
+                    _trust = trust;
+
+                    // 批量回填检测结果：每 100 条一次封送（原来每条一次，3324 次 BeginInvoke）
+                    List<CatalogItem> pending = new List<CatalogItem>();
+                    List<bool> pendingMiss = new List<bool>();
                     int done = 0, absent = 0;
                     foreach (CatalogItem it in dedup)
                     {
                         bool miss = Scanner.IsAbsent(it);
                         if (miss) absent++;
-                        CatalogItem capture = it;
-                        bool missCapture = miss;
-                        Dispatcher.BeginInvoke(new Action(delegate
-                        {
-                            capture.State = missCapture ? ItemState.Absent : ItemState.Present;
-                            capture.Detail = missCapture ? "缺失" : "已安装";
-                            if (capture.State == ItemState.Present && capture.Kind != ItemKind.SystemDll
-                                && (capture.Version == null || capture.Version == "—"))
-                            {
-                                string v = SystemProbe.FindInstalledVersion(
-                                    string.IsNullOrEmpty(capture.DisplayName) ? capture.DisplayVersion : capture.DisplayName);
-                                if (!string.IsNullOrEmpty(v)) capture.Version = v;
-                            }
-                        }));
+                        pending.Add(it);
+                        pendingMiss.Add(miss);
                         done++;
-                        if (done % 50 == 0)
+                        if (pending.Count >= 100)
                         {
-                            int d = done, a = absent, total = dedup.Count;
+                            // 模型写入 + 进度合并成一次封送：后台线程不直接改绑定对象
+                            List<CatalogItem> batch = new List<CatalogItem>(pending);
+                            List<bool> batchMiss = new List<bool>(pendingMiss);
+                            pending.Clear();
+                            pendingMiss.Clear();
+                            int d0 = done, a0 = absent, total0 = dedup.Count;
                             Dispatcher.BeginInvoke(new Action(delegate
                             {
-                                Report(string.Format("检测中 {0}/{1}，缺失 {2}", d, total, a),
-                                       total == 0 ? 0 : d * 100 / total, false);
+                                for (int bi = 0; bi < batch.Count; bi++)
+                                {
+                                    batch[bi].State = batchMiss[bi] ? ItemState.Absent : ItemState.Present;
+                                    batch[bi].Detail = batchMiss[bi] ? "缺失" : "已安装";
+                                }
+                                Report(string.Format("检测中 {0}/{1}，缺失 {2}", d0, total0, a0),
+                                       total0 == 0 ? 0 : d0 * 100 / total0, false);
                             }));
                         }
+                    }
+                    // 末尾不足 100 条的尾批：同样封送，不靠后面的 ApplySort/Refresh 兜底
+                    if (pending.Count > 0)
+                    {
+                        List<CatalogItem> tail = new List<CatalogItem>(pending);
+                        List<bool> tailMiss = new List<bool>(pendingMiss);
+                        pending.Clear();
+                        pendingMiss.Clear();
+                        Dispatcher.BeginInvoke(new Action(delegate
+                        {
+                            for (int bi = 0; bi < tail.Count; bi++)
+                            {
+                                tail[bi].State = tailMiss[bi] ? ItemState.Absent : ItemState.Present;
+                                tail[bi].Detail = tailMiss[bi] ? "缺失" : "已安装";
+                            }
+                        }));
                     }
 
                     int totalItems = dedup.Count;
                     int absentFinal = absent;
                     Dispatcher.BeginInvoke(new Action(delegate
                     {
+                        // 细节文案（源缺失 / 驱动 / 已安装版本）在 UI 线程统一回填
+                        foreach (CatalogItem it in _items)
+                        {
+                            if (it.SourceDead) { it.Detail = "源缺失，暂不支持自动修复"; continue; }
+                            if (it.IsDriver) { it.Detail = "驱动文件，不在修复范围"; continue; }
+                            if (it.State != ItemState.Present) continue;
+                            if (it.Kind == ItemKind.SystemDll) continue;
+                            if (it.Version != null && it.Version != "—") continue;
+                            string dv = string.IsNullOrEmpty(it.DisplayName) ? it.DisplayVersion : it.DisplayName;
+                            string v = SystemProbe.FindInstalledVersion(dv);
+                            if (!string.IsNullOrEmpty(v)) it.Version = v;
+                        }
                         EnterBusy(false);
                         ApplySort();
                         UpdateCards();
@@ -1393,7 +1640,10 @@ namespace DllFix.Ui
                         SetButtonText(_btnScan, "重新检查");
                         if (_placeholder != null)
                             _placeholder.Visibility = _items.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
-                        Report(string.Format("扫描完成：共 {0} 项，缺失/待修复 {1} 项", totalItems, absentFinal), 100, false);
+                        ApplyTrustUi();
+                        string tail = trust.CanRepair ? "" : "（只读：目录未通过完整性校验）";
+                        Report(string.Format("扫描完成：共 {0} 项，缺失/待修复 {1} 项{2}",
+                            totalItems, absentFinal, tail), 100, false);
                     }));
                 }
                 catch (Exception ex)
@@ -1428,29 +1678,51 @@ namespace DllFix.Ui
         // ── 修复 / 下载 ─────────────────────────────────────────────────────
         private void BeginRepair()
         {
-            if (_busy) return;
-
             if (_busy)
             {
                 Dlg.Info("提示", "正在检测或处理中，请稍候…");
                 return;
             }
 
-            // 只修复"确认为缺失"的项：正常(Present)、已修复(Done)、未检测(Unknown) 一律不动
+            // 目录信任门禁（发布硬门禁）：manifest 未通过完整性校验 -> 只读，可扫不可修
+            if (_trust != null && !_trust.CanRepair)
+            {
+                Dlg.Error("目录未通过完整性校验，已切换为只读",
+                    "本次不执行修复。\n\n原因：" + _trust.Reason +
+                    "\n\n目录可能被篡改、清单覆盖不全，或当前不是 HTTPS 连接。\n" +
+                    "可以继续扫描查看状态；请稍后重试或联系发布方。");
+                return;
+            }
+
+            // 只修复"确认为缺失"的项：正常/已修复/未检测一律不动；
+            // 源缺失（download_status=dead*）与驱动文件不进修复队列（captain 定案）。
             List<CatalogItem> picked = _items.Where(delegate(CatalogItem i)
             {
-                return i.Selected && i.State == ItemState.Absent;
+                return i.Selected && i.State == ItemState.Absent && !i.SourceDead && !i.IsDriver;
             }).ToList();
+            int deadCount = _items.Count(delegate(CatalogItem i)
+            { return i.Selected && i.State == ItemState.Absent && i.SourceDead; });
 
             if (picked.Count == 0)
             {
-                Dlg.Info("提示", "没有需要修复的项：当前扫描结果里没有标记为「缺失」的组件。");
+                string extra = deadCount > 0
+                    ? string.Format("另有 {0} 项「源缺失」，暂不支持自动修复。", deadCount) : "";
+                Dlg.Info("提示", "没有可以自动修复的项：当前结果里没有可下载的缺失组件。\n" + extra);
                 return;
             }
 
             int normalCount = _items.Count(delegate(CatalogItem i) { return i.State == ItemState.Present; });
-            if (!Dlg.Confirm("确认修复", string.Format("将修复 {0} 项缺失组件，自动跳过 {1} 项正常组件。\n\n继续？",
-                    picked.Count, normalCount))) return;
+            int uncovered = picked.Count(delegate(CatalogItem i) { return !i.HashCovered; });
+            StringBuilder ask = new StringBuilder();
+            ask.AppendFormat("将修复 {0} 项缺失组件，自动跳过 {1} 项正常组件。", picked.Count, normalCount);
+            if (deadCount > 0)
+                ask.AppendFormat("\n其中 {0} 项「源缺失」已跳过（暂不支持自动修复）。", deadCount);
+            ask.Append("\n\n目录完整性：已通过签名校验（HTTPS）。");
+            if (_trust != null) ask.Append("\n" + _trust.CoverageText);
+            if (uncovered > 0)
+                ask.AppendFormat("\n注意：{0} 项内容未做哈希校验（目录已签名、走 HTTPS）。", uncovered);
+            ask.Append("\n\n继续？");
+            if (!Dlg.Confirm("确认修复", ask.ToString())) return;
 
             if (!RepairEngineHolder.DryRun && !SystemProbe.IsElevated && picked.Any(delegate(CatalogItem i)
                 { return i.Kind == ItemKind.SystemDll; }))
@@ -1471,6 +1743,13 @@ namespace DllFix.Ui
             RepairEngine engine = new RepairEngine();
             engine.DryRun = RepairEngineHolder.DryRun;
             engine.DownloadOnly = _downloadOnly;
+            engine.Trust = MultiTrustAdapter();
+            // 所有模型写操作统一封送到 UI 线程（后台线程不直接碰绑定对象）
+            engine.Post = delegate(Action a)
+            {
+                if (Dispatcher.CheckAccess()) a();
+                else Dispatcher.Invoke(a);
+            };
 
             engine.Overall += delegate(int d, int total)
             {
@@ -1501,6 +1780,20 @@ namespace DllFix.Ui
                         ApplySort();
                         UpdateCards();
                         Report(string.Format("完成：成功 {0}，失败 {1}", engine.Success, engine.Failed), 100, false);
+                        if (engine.Failed > 0)
+                        {
+                            // 把失败原因带回界面（原来只有"失败"两个字，用户无从诊断）
+                            StringBuilder det = new StringBuilder();
+                            int shown = 0;
+                            foreach (CatalogItem it in picked)
+                            {
+                                if (it.State != ItemState.Failed) continue;
+                                if (shown++ >= 5) break;
+                                det.AppendLine("· " + it.Title + "：" + (it.Detail == null ? "未知原因" : it.Detail));
+                            }
+                            if (shown < engine.Failed) det.AppendLine("… 共 " + engine.Failed + " 项，见执行日志");
+                            Dlg.Error(Str.RepairFailedTitle, Str.F(Str.RepairFailedBody, engine.Failed, det.ToString()));
+                        }
                     }));
                 }
                 catch (Exception ex)
@@ -1538,12 +1831,16 @@ namespace DllFix.Ui
 
         private void OnLogLine(string line)
         {
-            if (line != null) _logLast.Text = line.Trim();
-            Dispatcher.BeginInvoke(new Action(delegate
+            // 后台线程（Log.Write）会直接回调到这里：统一封送到 UI 线程，绝不跨线程碰控件
+            if (line == null) return;
+            if (!Dispatcher.CheckAccess())
             {
-                _logBox.AppendText(line + Environment.NewLine);
-                _logBox.ScrollToEnd();
-            }));
+                Dispatcher.BeginInvoke(new Action(delegate { OnLogLine(line); }));
+                return;
+            }
+            _logLast.Text = line.Trim();
+            _logBox.AppendText(line + Environment.NewLine);
+            _logBox.ScrollToEnd();
         }
 
         private void Report(string text, int percent, bool busy)

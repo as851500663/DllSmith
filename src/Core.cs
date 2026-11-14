@@ -98,6 +98,30 @@ namespace DllFix.Core
         }
     }
 
+    // ── 诊断开关（只用于性能/回归定位，生产环境不设 DLLSMITH_DIAG 即全部关闭） ──
+    // 用法：set DLLSMITH_DIAG=nobanner,nofooter  然后启动 exe 复测空闲 CPU
+    public static class Diag
+    {
+        private static readonly HashSet<string> On = Load();
+
+        private static HashSet<string> Load()
+        {
+            HashSet<string> s = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            try
+            {
+                string v = Environment.GetEnvironmentVariable("DLLSMITH_DIAG");
+                if (!string.IsNullOrEmpty(v))
+                    foreach (string p in v.Split(','))
+                        if (p.Trim().Length > 0) s.Add(p.Trim());
+            }
+            catch { }
+            return s;
+        }
+
+        public static bool Has(string name) { return On.Contains(name); }
+        public static bool Any { get { return On.Count > 0; } }
+    }
+
     // ── 日志（对齐原程序的 Logs\ 滚动日志行为） ──────────────────────────────
     public static class Log
     {
@@ -148,38 +172,123 @@ namespace DllFix.Core
         public const string ProductName = "DllSmith";
         public const string ChineseName = "DLL 修复匠";
         public const string Tagline = "开源运行库与 DLL 修复工具";
-        public const string Version = "1.3.1";
+#if DS_TESTBUILD
+        public const string Version = "1.4.0-test";     // 测试构建：名字/版本都带 -test，防止误发
+#else
+        public const string Version = "1.4.0";
+#endif
         public const string License = "GPL-3.0";
-        public const string SiteUrl  = "http://123.57.94.141:8787/download";
+        public const string SiteUrl  = "https://123.57.94.141:9443/download";
         public const string BuildTag = "opensource";
     }
 
-    // ── 客户端配置（config.json：{"server":"http://host:port"}） ────────────
+    // ── 客户端配置（config.json：{"server":"https://host:port","channel":"stable"}） ──
     public static class Config
     {
         private static bool _loaded;
         private static string _server;
+        private static string _channel = "stable";
+        private static bool _telemetry = true;
+        private static bool _allowInsecure;
 
+        /// <summary>目录服务地址（1.4.0 起默认 https；http 只作为"离线模式"判据，不做明文信任）</summary>
         public static string ServerUrl
         {
             get
             {
-                if (_loaded) return _server;
-                _loaded = true;
-                try
-                {
-                    string path = Path.Combine(Paths.BaseDir, "config.json");
-                    if (File.Exists(path))
-                    {
-                        Dictionary<string, object> d = Json.Parse(File.ReadAllText(path, Encoding.UTF8))
-                            as Dictionary<string, object>;
-                        if (d != null) _server = Json.GetString(d, "server").TrimEnd('/');
-                    }
-                }
-                catch (Exception ex) { Log.Error("config.json parse failed", ex); }
-                if (!string.IsNullOrEmpty(_server)) Log.Info("server catalog: " + _server);
+                EnsureLoaded();
                 return _server;
             }
+        }
+
+        /// <summary>更新通道：stable / beta</summary>
+        public static string Channel
+        {
+            get { EnsureLoaded(); return _channel; }
+        }
+
+        /// <summary>是否参与匿名在线统计（默认开启，可在 config.json 里 "telemetry": false 关闭）</summary>
+        public static bool Telemetry
+        {
+            get { EnsureLoaded(); return _telemetry; }
+        }
+
+        /// <summary>允许非 https 目录服务（仅供本机联调；正式包默认 false）</summary>
+        public static bool AllowInsecureServer
+        {
+            get { EnsureLoaded(); return _allowInsecure; }
+        }
+
+        /// <summary>目录服务是否可用于"可信"场景（https 或显式放行）</summary>
+        public static bool ServerUsable
+        {
+            get
+            {
+                string s = ServerUrl;
+                if (string.IsNullOrEmpty(s)) return false;
+                return UpdateTrust.IsHttps(s) || AllowInsecureServer;
+            }
+        }
+
+        private static void EnsureLoaded()
+        {
+            if (_loaded) return;
+            _loaded = true;
+            try
+            {
+                string path = Path.Combine(Paths.BaseDir, "config.json");
+                if (File.Exists(path))
+                {
+                    Dictionary<string, object> d = Json.Parse(File.ReadAllText(path, Encoding.UTF8))
+                        as Dictionary<string, object>;
+                    if (d != null)
+                    {
+                        _server = Json.GetString(d, "server").TrimEnd('/');
+                        string ch = Json.GetString(d, "channel");
+                        if (!string.IsNullOrEmpty(ch)) _channel = ch.Trim();
+                        object tel;
+                        if (d.TryGetValue("telemetry", out tel) && tel is bool) _telemetry = (bool)tel;
+                        object ins;
+                        if (d.TryGetValue("allow_insecure_server", out ins) && ins is bool) _allowInsecure = (bool)ins;
+                    }
+                }
+            }
+            catch (Exception ex) { Log.Error("config.json parse failed", ex); }
+
+            // 1.3.1 的 config.json 写的是 http://…:8787；1.4.0 起迁移到 https://…:9443
+            // （不改用户文件，只在内存里升级；未知端口映射不到就不升级，交由 ServerUsable 判离线）
+            if (!string.IsNullOrEmpty(_server) && _server.StartsWith("http://", StringComparison.OrdinalIgnoreCase)
+                && !_allowInsecure)
+            {
+                string upgraded = UpgradeToHttps(_server);
+                if (upgraded != null)
+                {
+                    Log.Info("config server upgraded to https: " + ApiClient.SafeUrl(upgraded));
+                    _server = upgraded;
+                }
+                else
+                {
+                    Log.Info("config server kept as http (no https mapping): " + ApiClient.SafeUrl(_server));
+                }
+            }
+            if (!string.IsNullOrEmpty(_server)) Log.Info("server catalog: " + ApiClient.SafeUrl(_server)
+                + " channel=" + _channel + " telemetry=" + _telemetry);
+        }
+
+        /// <summary>明文端口到 TLS 端口的映射（服务端 8787 明文 / 9443 TLS）</summary>
+        public static string UpgradeToHttps(string httpUrl)
+        {
+            try
+            {
+                Uri u = new Uri(httpUrl);
+                int port = u.IsDefaultPort ? 8787 : u.Port;
+                int tlsPort = port == 8787 ? 9443 : (port == 80 ? 443 : port);
+                if (tlsPort == port && port != 9443) { /* 端口无映射时仍按同端口尝试 */ }
+                UriBuilder b = new UriBuilder("https", u.Host, tlsPort);
+                b.Path = u.AbsolutePath;
+                return b.Uri.ToString().TrimEnd('/');
+            }
+            catch { return null; }
         }
     }
 
@@ -294,7 +403,58 @@ namespace DllFix.Core
         public string DisplayVersion { get; set; }
         public string Wow6432Node { get; set; }
         public string Match { get; set; }
+        public string PkgUrl { get; set; }   // 目录里原始 DOWNLOAD（未被子文件地址覆盖）
         public string DownloadDll { get; set; }
+
+        /// <summary>服务端下载源状态（catalog 的 download_status）：ok / dead:… / dead_source …</summary>
+        public string DownloadStatus { get; set; }
+
+        /// <summary>下载源已失效：允许扫描展示，但不进修复队列（captain 2026-11-14 定案）</summary>
+        public bool SourceDead
+        {
+            get
+            {
+                return !string.IsNullOrEmpty(DownloadStatus)
+                    && DownloadStatus.StartsWith("dead", StringComparison.OrdinalIgnoreCase);
+            }
+        }
+
+        /// <summary>是否驱动文件（.sys/.drv）：留在列表里但默认不勾选、不修复</summary>
+        public bool IsDriver { get; set; }
+
+        /// <summary>条目所属目录 key（用于按 key 校验签名 manifest）</summary>
+        public string SourceKey { get; set; }
+
+        /// <summary>条目自带 oss_key（服务端 1.4.0 新增；优先用它换签名地址）</summary>
+        public string OssKey { get; set; }
+
+        private string _sha256 = string.Empty;
+
+        /// <summary>条目级下载哈希（明文口径，来自签名 manifest 或条目 SHA256 字段）；空 = 未被哈希覆盖</summary>
+        public string Sha256
+        {
+            get { return _sha256; }
+            set
+            {
+                _sha256 = value == null ? string.Empty : value.Trim().ToLowerInvariant();
+                Raise("Sha256");
+                Raise("HashCovered");
+                Raise("HashText");
+            }
+        }
+
+        /// <summary>该条目是否有哈希可用（true 才做逐字节校验）</summary>
+        public bool HashCovered
+        {
+            get { return _sha256.Length > 0; }
+        }
+
+        /// <summary>列表展示用：有哈希 / 哈希未覆盖</summary>
+        public string HashText
+        {
+            get { return _sha256.Length > 0 ? "已校验" : "哈希未覆盖"; }
+        }
+
         public CheckKind Check { get; set; }
         public ItemKind Kind { get; set; }
 
@@ -307,7 +467,7 @@ namespace DllFix.Core
         public ItemState State
         {
             get { return _state; }
-            set { _state = value; Raise("State"); Raise("StateText"); Raise("IsMissing"); }
+            set { _state = value; Raise("State"); Raise("StateText"); Raise("IsMissing"); Raise("StateKey"); }
         }
 
         public bool IsMissing
@@ -342,6 +502,7 @@ namespace DllFix.Core
         {
             get
             {
+                if (SourceDead) return "源缺失";
                 switch (State)
                 {
                     case ItemState.Absent: return "缺失";
@@ -352,6 +513,59 @@ namespace DllFix.Core
                     case ItemState.Failed: return "失败";
                     default: return "待检测";
                 }
+            }
+        }
+
+        /// <summary>
+        /// 状态稳定键（ASCII）：DataTemplate 的 DataTrigger 绑这个而不是中文 StateText，
+        /// 这样文案可以自由本地化而不会把触发器打散。
+        /// </summary>
+        public string StateKey
+        {
+            get
+            {
+                if (SourceDead) return "dead";
+                switch (State)
+                {
+                    case ItemState.Absent: return "absent";
+                    case ItemState.Present: return "present";
+                    case ItemState.Downloading: return "downloading";
+                    case ItemState.Installing: return "installing";
+                    case ItemState.Done: return "done";
+                    case ItemState.Failed: return "failed";
+                    default: return "unknown";
+                }
+            }
+        }
+
+        /// <summary>
+        /// 排序键（配合 CollectionViewSource 原地排序，不换 ItemsSource）：
+        /// 缺失置顶 -> 正常 -> 未判定垫底。
+        /// </summary>
+        public int SortRank
+        {
+            get
+            {
+                if (State == ItemState.Absent || State == ItemState.Failed) return 0;
+                if (State == ItemState.Unknown) return 2;
+                return 1;
+            }
+        }
+
+        /// <summary>第四列：运行库显示版本，系统 DLL 显示目标路径（P1：系统 DLL 页缺路径列）</summary>
+        public string InfoText
+        {
+            get
+            {
+                if (Kind == ItemKind.SystemDll && !string.IsNullOrEmpty(FilePath))
+                {
+                    string p = Paths.ResolveX(FilePath);
+                    string win = Environment.GetFolderPath(Environment.SpecialFolder.Windows);
+                    if (!string.IsNullOrEmpty(win) && p.StartsWith(win, StringComparison.OrdinalIgnoreCase))
+                        return "…" + p.Substring(win.Length);
+                    return p;
+                }
+                return string.IsNullOrEmpty(Version) ? "—" : Version;
             }
         }
 
@@ -387,6 +601,216 @@ namespace DllFix.Core
         }
     }
 
+    // ── 目录缓存（本地优先 + 并发预取 + 失败缓存 5 分钟） ────────────────────
+    //  性能审计 §1：原实现"远程优先且串行"，断网时 6 个 JSON 各等 2s，扫描墙钟 12.8s。
+    //  现在：扫描永远读本地（0ms），启动时 6 个 key 并发拉远程，成功才替换；
+    //        失败结果记 5 分钟，避免每次进页面都去撞超时。
+    public static class CatalogCache
+    {
+        private static readonly Dictionary<string, List<Dictionary<string, object>>> Ok =
+            new Dictionary<string, List<Dictionary<string, object>>>(StringComparer.OrdinalIgnoreCase);
+        private static readonly Dictionary<string, DateTime> FailUntil =
+            new Dictionary<string, DateTime>(StringComparer.OrdinalIgnoreCase);
+        private static readonly Dictionary<string, DateTime> OkAt =
+            new Dictionary<string, DateTime>(StringComparer.OrdinalIgnoreCase);
+        private static readonly Dictionary<string, Dictionary<string, string>> Headers =
+            new Dictionary<string, Dictionary<string, string>>(StringComparer.OrdinalIgnoreCase);
+        private static readonly Dictionary<string, Dictionary<string, object>> Manifests =
+            new Dictionary<string, Dictionary<string, object>>(StringComparer.OrdinalIgnoreCase);
+        private static readonly object Sync = new object();
+        private static readonly HashSet<string> InFlight = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+        /// <summary>单次失败的冷却时间</summary>
+        public static readonly TimeSpan FailCooldown = TimeSpan.FromMinutes(5);
+
+        /// <summary>调度完成（在做 UI 线程上触发；用于"目录已更新"提示）</summary>
+        public static event Action<int, int> Refreshed;
+
+        public static List<Dictionary<string, object>> Get(string key)
+        {
+            lock (Sync)
+            {
+                List<Dictionary<string, object>> v;
+                if (Ok.TryGetValue(key, out v)) return v;
+                return null;
+            }
+        }
+
+        /// <summary>目录响应头（X-Manifest-Count / -Lines-Sha256 / -Sig / -Kid …）</summary>
+        public static Dictionary<string, string> GetHeaders(string key)
+        {
+            lock (Sync)
+            {
+                Dictionary<string, string> h;
+                if (key != null && Headers.TryGetValue(key, out h)) return h;
+                return null;
+            }
+        }
+
+        /// <summary>catalog 响应内联的 manifest 对象（?with_manifest=1 信封），没有则 null</summary>
+        public static Dictionary<string, object> GetManifest(string key)
+        {
+            lock (Sync)
+            {
+                Dictionary<string, object> m;
+                if (key != null && Manifests.TryGetValue(key, out m)) return m;
+                return null;
+            }
+        }
+
+        public static DateTime? LastSuccess(string key)
+        {
+            lock (Sync)
+            {
+                DateTime t;
+                if (OkAt.TryGetValue(key, out t)) return t;
+            }
+            return null;
+        }
+
+        /// <summary>并发预取（每个 key 一个后台线程，最多 6 个；同一 key 不重复拉）</summary>
+        public static void PrefetchAsync(IEnumerable<string> keys)
+        {
+            if (!Config.ServerUsable) return;      // 离线模式：不碰网络
+            foreach (string k in keys)
+            {
+                if (string.IsNullOrEmpty(k)) continue;
+                lock (Sync)
+                {
+                    if (InFlight.Contains(k)) continue;
+                    DateTime until;
+                    if (FailUntil.TryGetValue(k, out until) && until > DateTime.Now) continue;
+                    if (Ok.ContainsKey(k)) continue;
+                    InFlight.Add(k);
+                }
+                string key = k;
+                Thread t = new Thread(delegate() { Fetch(key); });
+                t.IsBackground = true;
+                t.Start();
+            }
+        }
+
+        /// <summary>强制刷新（用户点「重新检查」时只清失败缓存，不重复拉已成功的）</summary>
+        public static void ClearFailureCache()
+        {
+            lock (Sync) FailUntil.Clear();
+        }
+
+        private static void Fetch(string key)
+        {
+            string body = string.Empty;
+            try
+            {
+                string url = Config.ServerUrl + "/api/v1/catalog?key=" + Uri.EscapeDataString(key);
+                Dictionary<string, string> headers;
+                // 一次请求同时拿 items + 内联 manifest（?with_manifest=1）；不支持则回退纯数组
+                body = ApiClient.GetRawWithHeaders(url + "&with_manifest=1", ApiClient.MetaTimeoutMs, out headers);
+                Dictionary<string, object> manifest = null;
+                List<Dictionary<string, object>> items = ParseEnvelope(body, out manifest);
+                if (items == null || items.Count == 0)
+                {
+                    body = ApiClient.GetRawWithHeaders(url, ApiClient.MetaTimeoutMs, out headers);
+                    items = ParseItems(body);
+                }
+                lock (Sync)
+                {
+                    InFlight.Remove(key);
+                    if (items != null && items.Count > 0)
+                    {
+                        Ok[key] = items;
+                        OkAt[key] = DateTime.Now;
+                        if (headers != null) Headers[key] = headers;
+                        if (manifest != null) Manifests[key] = manifest;
+                        FailUntil.Remove(key);
+                    }
+                    else
+                    {
+                        FailUntil[key] = DateTime.Now.Add(FailCooldown);
+                    }
+                }
+                if (items != null && items.Count > 0) RaiseRefreshed();
+                else Log.Info("catalog remote unavailable (cached 5min): " + key);
+            }
+            catch (Exception ex)
+            {
+                lock (Sync)
+                {
+                    InFlight.Remove(key);
+                    FailUntil[key] = DateTime.Now.Add(FailCooldown);
+                }
+                Log.Error("catalog remote failed: " + key, ex);
+            }
+        }
+
+        /// <summary>
+        /// 信封形态：{"items":[...],"manifest":{...}}（?with_manifest=1）。
+        /// 解析成功返回 items 并输出 manifest 字典；不是信封则返回 null。
+        /// </summary>
+        private static List<Dictionary<string, object>> ParseEnvelope(string body,
+            out Dictionary<string, object> manifest)
+        {
+            manifest = null;
+            if (string.IsNullOrEmpty(body)) return null;
+            string trimmed = body.Trim();
+            if (!trimmed.StartsWith("{", StringComparison.Ordinal)) return null;
+            Dictionary<string, object> d = Json.Parse(trimmed) as Dictionary<string, object>;
+            if (d == null) return null;
+            object itemsObj, manObj;
+            if (!d.TryGetValue("items", out itemsObj) || !(itemsObj is object[])) return null;
+            if (d.TryGetValue("manifest", out manObj)) manifest = manObj as Dictionary<string, object>;
+            return Json.ParseObjectArray(Json.Stringify(itemsObj));
+        }
+
+        /// <summary>兼容两种下发形态：JSON 数组，或 `{"items":[...],"manifest":{...}}` 信封。</summary>
+        private static List<Dictionary<string, object>> ParseItems(string body)
+        {
+            if (string.IsNullOrEmpty(body)) return null;
+            string trimmed = body.Trim();
+            if (trimmed.StartsWith("[", StringComparison.Ordinal))
+                return Json.ParseObjectArray(trimmed);
+            if (trimmed.StartsWith("{", StringComparison.Ordinal))
+            {
+                Dictionary<string, object> d = Json.Parse(trimmed) as Dictionary<string, object>;
+                if (d == null) return null;
+                object items;
+                if (d.TryGetValue("items", out items) && items is object[])
+                    return Json.ParseObjectArray(body);
+            }
+            return null;
+        }
+
+        /// <summary>从 catalog 响应头构造内联 manifest 字段（省一次 /api/v1/manifest 往返）</summary>
+        public static Dictionary<string, object> InlineManifestFromHeaders(Dictionary<string, string> headers)
+        {
+            if (headers == null) return null;
+            string sig = GetHeader(headers, "X-Manifest-Sig");
+            if (string.IsNullOrEmpty(sig)) return null;
+            Dictionary<string, object> d = new Dictionary<string, object>();
+            d["manifest_sig"] = sig;
+            d["manifest_lines_sha256"] = GetHeader(headers, "X-Manifest-Lines-Sha256");
+            d["manifest_entries_sha256"] = GetHeader(headers, "X-Manifest-Entries-Sha256");
+            d["manifest_count"] = GetHeader(headers, "X-Manifest-Count");
+            d["manifest_kid"] = GetHeader(headers, "X-Manifest-Kid");
+            d["manifest_alg"] = GetHeader(headers, "X-Manifest-Alg");
+            return d;
+        }
+
+        private static string GetHeader(Dictionary<string, string> headers, string name)
+        {
+            string v;
+            return headers.TryGetValue(name, out v) ? (v == null ? "" : v.Trim()) : "";
+        }
+
+        private static void RaiseRefreshed()
+        {
+            Action<int, int> h = Refreshed;
+            if (h == null) return;
+            int ok, total;
+            lock (Sync) { ok = Ok.Count; total = Ok.Count + FailUntil.Count; }
+            try { h(ok, total); } catch { }
+        }
+    }
+
     // ── 目录加载（对应逆向报告 §8.1 的 18 个 JSON） ──────────────────────────
     public static class Catalog
     {
@@ -395,15 +819,32 @@ namespace DllFix.Core
             string file = Path.Combine(Path.Combine(Paths.JsonDir, "SystemDllJson"),
                 "SystemDll_" + OsTag() + "_" + (is64 ? "64" : "32") + ".json");
             List<CatalogItem> list = new List<CatalogItem>();
+            string srcKey = Path.GetFileNameWithoutExtension(file);
+            int sysSkipped = 0;
             foreach (Dictionary<string, object> d in ReadArray(file))
             {
                 CatalogItem it = new CatalogItem();
                 it.Category = "系统DLL";
+                it.SourceKey = srcKey;
                 it.FileName = Json.GetString(d, "FILENAME");
+                // P1：系统 DLL 页混入 .sys/.drv 驱动。驱动**保留在列表里**（否则条目数与签名清单
+                // 2634 对不上，目录完整性断言会失败），但标记为驱动、默认不勾选、不可修复。
+                string ext = Path.GetExtension(it.FileName == null ? "" : it.FileName);
+                if (string.Equals(ext, ".sys", StringComparison.OrdinalIgnoreCase)
+                    || string.Equals(ext, ".drv", StringComparison.OrdinalIgnoreCase))
+                {
+                    sysSkipped++;
+                    it.IsDriver = true;
+                    it.Selected = false;
+                }
                 it.FilePath = Json.GetString(d, "FILEPATH");
                 string fp = (it.FilePath == null ? "" : it.FilePath.Trim());
                 if (fp == "0" || fp == "?" || fp == "???") it.FilePath = "";
                 it.Download = Json.GetString(d, "DOWNLOAD");
+                it.OssKey = Json.GetString(d, "OSS_KEY", "oss_key");
+                it.DownloadStatus = Json.GetString(d, "download_status", "DOWNLOAD_STATUS");
+                string sha = Json.GetString(d, "SHA256", "sha256");
+                if (Hashes.LooksLikeSha256(sha)) it.Sha256 = sha;
                 it.Check = CheckKind.FileExists;
                 it.Kind = ItemKind.SystemDll;
                 it.Arch = is64 ? "x64" : "x86";
@@ -411,7 +852,8 @@ namespace DllFix.Core
                 it.Version = "—";
                 list.Add(it);
             }
-            Log.Info("catalog SystemDll " + Path.GetFileName(file) + " items=" + list.Count);
+            Log.Info("catalog SystemDll " + Path.GetFileName(file) + " items=" + list.Count
+                     + " (skipped .sys=" + sysSkipped + ")");
             return list;
         }
 
@@ -420,10 +862,12 @@ namespace DllFix.Core
             string path = Path.Combine(Path.Combine(Paths.JsonDir, "VCDirectxJson"),
                 jsonFile + "_" + (is64 ? "64" : "32") + ".json");
             List<CatalogItem> list = new List<CatalogItem>();
+            string srcKey2 = Path.GetFileNameWithoutExtension(path);
             foreach (Dictionary<string, object> d in ReadArray(path))
             {
                 CatalogItem it = new CatalogItem();
                 it.Category = category;
+                it.SourceKey = srcKey2;
                 it.DisplayName = Json.GetString(d, "DISPLAYNAME");
                 string dn = (it.DisplayName == null ? "" : it.DisplayName.Trim());
                 if (dn == "0" || dn == "???" || dn == "?" ) it.DisplayName = "";
@@ -437,6 +881,10 @@ namespace DllFix.Core
                 it.Wow6432Node = Json.GetString(d, "WOW6432NODE", "WOW6434NODE");
                 it.Match = Json.GetString(d, "MATCH");
                 it.DownloadDll = Json.GetString(d, "DOWNLOADDLL", "DOWNLOAD_DLL");
+                it.OssKey = Json.GetString(d, "OSS_KEY", "oss_key");
+                it.DownloadStatus = Json.GetString(d, "download_status", "DOWNLOAD_STATUS");
+                string sha2 = Json.GetString(d, "SHA256", "sha256");
+                if (Hashes.LooksLikeSha256(sha2)) it.Sha256 = sha2;
                 if (!string.IsNullOrEmpty(it.Match)) it.Check = CheckKind.MatchPattern;
                 else if (!string.IsNullOrEmpty(it.FilePath)) it.Check = CheckKind.FileExists;
                 else if (!string.IsNullOrEmpty(it.DisplayName)) it.Check = CheckKind.RegistryDisplayName;
@@ -445,6 +893,7 @@ namespace DllFix.Core
                 if (!string.IsNullOrEmpty(it.DownloadDll))
                 {
                     it.Kind = ItemKind.SystemDll;     // 单文件下载，直接覆盖
+                    it.PkgUrl = it.Download;          // 保留目录原始包地址（manifest 键用它，不能用单文件地址）
                     it.Download = it.DownloadDll;
                 }
                 else
@@ -489,38 +938,96 @@ namespace DllFix.Core
 
         private static List<Dictionary<string, object>> ReadArray(string file)
         {
-            // 1) 服务端优先：/api/v1/catalog?key=<文件名去扩展名>
-            string server = Config.ServerUrl;
-            if (!string.IsNullOrEmpty(server))
+            // 1) 服务端缓存优先（由 CatalogCache 在启动时并发预取；失败缓存 5 分钟）
+            string key = Path.GetFileNameWithoutExtension(file);
+            List<Dictionary<string, object>> remote = CatalogCache.Get(key);
+            if (remote != null && remote.Count > 0)
             {
-                string key = Path.GetFileNameWithoutExtension(file);
-                string body = ApiClient.GetRaw(server + "/api/v1/catalog?key=" + Uri.EscapeDataString(key));
-                if (!string.IsNullOrEmpty(body))
-                {
-                    try
-                    {
-                        List<Dictionary<string, object>> remote = Json.ParseObjectArray(body);
-                        if (remote.Count > 0)
-                        {
-                            Log.Info("catalog remote " + key + " items=" + remote.Count);
-                            return remote;
-                        }
-                    }
-                    catch (Exception ex) { Log.Error("remote catalog parse failed: " + key, ex); }
-                }
+                Log.Info("catalog source=remote " + key + " items=" + remote.Count);
+                return remote;
             }
 
-            // 2) 本地兜底
+            // 2) 本地兜底（立即返回，绝不为网络阻塞 UI / 扫描）
             try
             {
                 if (!File.Exists(file)) { Log.Info("catalog missing: " + file); return new List<Dictionary<string, object>>(); }
-                return Json.ParseObjectArray(File.ReadAllText(file, Encoding.UTF8));
+                List<Dictionary<string, object>> local = Json.ParseObjectArray(File.ReadAllText(file, Encoding.UTF8));
+                Log.Info("catalog source=local " + key + " items=" + local.Count);
+                return local;
             }
             catch (Exception ex)
             {
                 Log.Error("catalog parse failed: " + file, ex);
                 return new List<Dictionary<string, object>>();
             }
+        }
+
+        /// <summary>
+        /// 按 catalog key **精确**加载对应 JSON（不做 OS 架构映射）。
+        /// 用于自检/普查要访问非当前系统目录（例如 .com 只存在于 SystemDll_win7_64）。
+        /// </summary>
+        public static List<CatalogItem> LoadCatalogFileExact(string key)
+        {
+            List<CatalogItem> list = new List<CatalogItem>();
+            if (string.IsNullOrEmpty(key) || !Directory.Exists(Paths.JsonDir)) return list;
+            string found = null;
+            foreach (string f in Directory.GetFiles(Paths.JsonDir, key + ".json", SearchOption.AllDirectories))
+            { found = f; break; }
+            if (found == null) { Log.Info("catalog file not found: " + key); return list; }
+            foreach (Dictionary<string, object> d in Json.ParseObjectArray(File.ReadAllText(found, Encoding.UTF8)))
+            {
+                CatalogItem it = new CatalogItem();
+                it.SourceKey = key;
+                it.Category = "census";
+                it.FileName = Json.GetString(d, "FILENAME");
+                it.DisplayName = Json.GetString(d, "DISPLAYNAME");
+                it.FilePath = Json.GetString(d, "FILEPATH");
+                it.Download = Json.GetString(d, "DOWNLOAD");
+                it.OssKey = Json.GetString(d, "OSS_KEY", "oss_key");
+                it.DownloadStatus = Json.GetString(d, "download_status", "DOWNLOAD_STATUS");
+                string sha = Json.GetString(d, "SHA256", "sha256");
+                if (Hashes.LooksLikeSha256(sha)) it.Sha256 = sha;
+                it.Kind = ItemKind.SystemDll;
+                it.Name = string.IsNullOrEmpty(it.DisplayName) ? it.FileName : it.DisplayName;
+                list.Add(it);
+            }
+            return list;
+        }
+        /// <summary>按 catalog key 直接加载（--verify-manifest 自检用）</summary>
+        public static List<CatalogItem> LoadByKey(string key)
+        {
+            if (string.IsNullOrEmpty(key)) return new List<CatalogItem>();
+            bool is64 = Environment.Is64BitOperatingSystem;
+            string k = key.Trim();
+            if (k.StartsWith("SystemDll_", StringComparison.OrdinalIgnoreCase))
+                return LoadSystemDll(is64);
+            if (k.StartsWith("VC_Scan", StringComparison.OrdinalIgnoreCase))
+                return LoadRuntime("运行库", "VC_Scan", is64);
+            if (k.StartsWith("VC_DLL_Scan", StringComparison.OrdinalIgnoreCase))
+                return LoadRuntime("运行库", "VC_DLL_Scan", is64);
+            if (k.StartsWith("DirectX", StringComparison.OrdinalIgnoreCase))
+                return LoadRuntime("DirectX", "DirectX", is64);
+            if (k.StartsWith("downlevel", StringComparison.OrdinalIgnoreCase))
+                return LoadRuntime("DownLevel", "downlevel", is64);
+            if (k.StartsWith("NETWORK", StringComparison.OrdinalIgnoreCase))
+                return LoadRuntime("Network", "NETWORK", is64);
+            Log.Info("unknown catalog key: " + key);
+            return new List<CatalogItem>();
+        }
+
+        /// <summary>当前系统需要的 6 个目录 key（启动时并发预取用）</summary>
+        public static List<string> KeysForCurrentOs()
+        {
+            bool is64 = Environment.Is64BitOperatingSystem;
+            string tag = OsTag();
+            List<string> keys = new List<string>();
+            keys.Add("SystemDll_" + tag + "_" + (is64 ? "64" : "32"));
+            keys.Add("VC_Scan_" + (is64 ? "64" : "32"));
+            keys.Add("VC_DLL_Scan_" + (is64 ? "64" : "32"));
+            keys.Add("DirectX_" + (is64 ? "64" : "32"));
+            keys.Add("downlevel_" + (is64 ? "64" : "32"));
+            keys.Add("NETWORK_" + (is64 ? "64" : "32"));
+            return keys;
         }
 
         /// <summary>对应原程序 SystemManageHelper.GetOsVersionInfo 的粗分类</summary>
@@ -573,7 +1080,6 @@ namespace DllFix.Core
     public static class SystemProbe
     {
         private static List<string> _displayNames;
-        private static List<KeyValuePair<string, string>> _uninstall;
 
         public static bool IsElevated
         {

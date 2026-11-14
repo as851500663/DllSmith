@@ -26,15 +26,30 @@ namespace DllFix.Ui
 
         public static bool Confirm(string title, string message)
         {
-            return Show(title, message, 1, true);
+            return Show(title, message, 1, true, "确定", "取消");
+        }
+
+        /// <summary>
+        /// 双出口选择（强制更新用）：只有 primary / cancel 两个按钮，关闭窗口 = cancel。
+        /// 返回 true 表示用户选择了 primary。
+        /// </summary>
+        public static bool Choose(string title, string message, string primaryText, string cancelText)
+        {
+            return Show(title, message, 1, true, primaryText, cancelText);
         }
 
         private static bool Show(string title, string message, int kind, bool cancel)
         {
+            return Show(title, message, kind, cancel, "确定", "取消");
+        }
+
+        private static bool Show(string title, string message, int kind, bool cancel,
+                                 string primaryText, string cancelText)
+        {
             Window owner = Application.Current != null ? Application.Current.MainWindow : null;
             Window w = new Window();
             w.WindowStyle = WindowStyle.None;
-            w.AllowsTransparency = true;
+            w.AllowsTransparency = true;          // 临时小窗：弹出即关，渲染代价可忽略
             w.Background = Brushes.Transparent;
             w.ResizeMode = ResizeMode.NoResize;
             w.SizeToContent = SizeToContent.Height;
@@ -128,13 +143,18 @@ namespace DllFix.Ui
 
             if (cancel)
             {
-                Button no = MakeButton("取消", false);
+                Button no = MakeButton(cancelText, false);
                 no.Click += delegate { w.DialogResult = false; w.Close(); };
                 btns.Children.Add(no);
+                no.IsCancel = true;
             }
 
-            Button ok = MakeButton(cancel ? "确定" : "我知道了", true);
-            ok.Click += delegate { w.DialogResult = cancel ? (bool?)true : null; w.Close(); };
+            Button ok = MakeButton(cancel ? primaryText : "我知道了", true);
+            ok.Click += delegate
+            {
+                w.DialogResult = cancel ? (bool?)true : null;
+                w.Close();
+            };
             btns.Children.Add(ok);
             root.Children.Add(btns);
 
