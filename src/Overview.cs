@@ -55,7 +55,56 @@ namespace DllFix.Ui
         public OverviewPage()
         {
             Build();
+            RestoreFromStore();
             UpdateSummary();
+        }
+
+        /// <summary>回到总览时，把详情页/上次检查的结果恢复出来（不重新扫描）</summary>
+        private void RestoreFromStore()
+        {
+            foreach (Section s in _sections)
+            {
+                if (s.Loader == null) continue;
+                List<CatalogItem> items = ScanStore.Get(s.PageIndex);
+                if (items == null || items.Count == 0) continue;
+
+                int miss = 0;
+                List<CatalogItem> preview = new List<CatalogItem>();
+                foreach (CatalogItem it in items)
+                {
+                    if (it.State == ItemState.Absent)
+                    {
+                        miss++;
+                        if (preview.Count < 40) preview.Add(it);
+                    }
+                }
+                if (preview.Count == 0)
+                {
+                    int take = 0;
+                    foreach (CatalogItem it in items)
+                    {
+                        if (take++ >= 12) break;
+                        preview.Add(it);
+                    }
+                }
+
+                s.Checked = true;
+                s.Missing = miss;
+                s.Total = items.Count;
+                if (miss > 0)
+                {
+                    s.Status.Text = string.Format("共 {0} 项，缺失 {1} 项", items.Count, miss);
+                    s.Status.Foreground = new SolidColorBrush(Color.FromRgb(0xD0, 0x5A, 0x5A));
+                }
+                else
+                {
+                    s.Status.Text = string.Format("共 {0} 项，全部正常", items.Count);
+                    s.Status.Foreground = new SolidColorBrush(Color.FromRgb(0x1E, 0x9A, 0x5A));
+                }
+                s.List.ItemsSource = preview;
+                s.List.Visibility = Visibility.Visible;
+                s.List.Height = 150;
+            }
         }
 
         private void Report(string text, int percent, bool busy)
@@ -182,6 +231,7 @@ namespace DllFix.Ui
             ScrollViewer sv = new ScrollViewer();
             sv.VerticalScrollBarVisibility = ScrollBarVisibility.Auto;
             sv.HorizontalScrollBarVisibility = ScrollBarVisibility.Disabled;
+            sv.Resources.Add(typeof(System.Windows.Controls.Primitives.ScrollBar), ScrollBarStyle());
             StackPanel host = new StackPanel();
             sv.Content = host;
 
@@ -468,7 +518,7 @@ namespace DllFix.Ui
                     UpdateSummary();
                     SetProgress(true, 100, "全部检查完成");
                     Report("全部检查完成", 0, false);
-                    MessageBox.Show("全部检查完成。\n\n缺失合计与可清理空间见上方汇总卡。", "完成");
+                    Dlg.Info("检查完成", "缺失合计与可清理空间见上方汇总卡。");
                 }));
             });
             t.IsBackground = true;
@@ -554,6 +604,7 @@ namespace DllFix.Ui
                 int total = items.Count;
                 int miss = missing;
                 List<CatalogItem> show = preview;
+                ScanStore.Put(s.PageIndex, items);
 
                 Dispatcher.BeginInvoke(new Action(delegate
                 {

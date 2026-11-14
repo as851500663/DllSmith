@@ -1302,18 +1302,16 @@ namespace DllFix.Ui
             List<CleanItem> picked = _items.Where(delegate(CleanItem i) { return i.Selected; }).ToList();
             if (picked.Count == 0)
             {
-                MessageBox.Show("请先勾选要处理的项目。", "提示");
+                Dlg.Info("提示", "请先勾选要处理的项目。");
                 return;
             }
 
             if (_mode == 0)
             {
                 long bytes = picked.Sum(delegate(CleanItem x) { return x.Bytes; });
-                MessageBoxResult r = MessageBox.Show(
-                    string.Format("将清理 {0} 项缓存，预计释放 {1}。\n\n清理只涉及白名单目录（临时文件、更新缓存、日志、回收站等），被占用的文件会自动跳过。\n\n继续？",
-                        picked.Count, CleanEngine.FormatSize(bytes)),
-                    "确认清理", MessageBoxButton.YesNo, MessageBoxImage.Question);
-                if (r != MessageBoxResult.Yes) return;
+                string ask = string.Format("将清理 {0} 项缓存，预计释放 {1}。\n\n清理只涉及白名单目录（临时文件、更新缓存、日志、回收站等），被占用的文件会自动跳过。\n\n继续？",
+                    picked.Count, CleanEngine.FormatSize(bytes));
+                if (!Dlg.Confirm("确认清理", ask)) return;
 
                 CleanEngine.CancelRequested = false;
                 freeBeforeAction = CleanEngine.DiskFree();
@@ -1343,18 +1341,18 @@ namespace DllFix.Ui
                         if (errFinal != null)
                         {
                             Report("清理中断：" + errFinal.Split('\n')[0], 0, false);
-                            MessageBox.Show("清理过程中出现异常，已停止：\n" + errFinal, "清理失败");
+                            Dlg.Error("清理失败", "清理过程中出现异常，已停止：\n" + errFinal);
                         }
                         else
                         {
                             long freeNow = CleanEngine.DiskFree();
                             long delta = freeNow - freeBeforeAction;
                             Report("清理完成，释放 " + CleanEngine.FormatSize(freedFinal), 0, false);
-                            MessageBox.Show(string.Format("清理完成。\n\n统计释放：{0}\nC 盘可用：{1} → {2}（实际 +{3}）\n\n详情见日志面板。",
+                            Dlg.Info("清理完成", string.Format("统计释放：{0}\nC 盘可用：{1} → {2}（实际 +{3}）\n\n详情见日志面板。",
                                 CleanEngine.FormatSize(freedFinal),
                                 CleanEngine.FormatSize(freeBeforeAction),
                                 CleanEngine.FormatSize(freeNow),
-                                CleanEngine.FormatSize(delta < 0 ? 0 : delta)), "完成");
+                                CleanEngine.FormatSize(delta < 0 ? 0 : delta)));
                             // 保留列表：每行保留「完成」与已释放大小，便于核对
                         }
                     }));
@@ -1368,15 +1366,13 @@ namespace DllFix.Ui
             string target = (_target.Text ?? "").Trim();
             if (target.Length == 0)
             {
-                MessageBox.Show("请先填写目标目录（例如 D:\\DllSmithMove）。", "提示");
+                Dlg.Info("提示", "请先填写目标目录（例如 D:\\DllSmithMove）。");
                 return;
             }
             long total = picked.Sum(delegate(CleanItem x) { return x.Bytes; });
-            MessageBoxResult r2 = MessageBox.Show(
-                string.Format("将把 {0} 个文件夹（共 {1}）迁移到：\n{2}\n\n迁移完成后会在原位置创建目录联接（Junction），软件照常使用。\n\n继续？",
-                    picked.Count, CleanEngine.FormatSize(total), target),
-                "确认迁移", MessageBoxButton.YesNo, MessageBoxImage.Warning);
-            if (r2 != MessageBoxResult.Yes) return;
+            string ask2 = string.Format("将把 {0} 个文件夹（共 {1}）迁移到：\n{2}\n\n迁移完成后会在原位置创建目录联接（Junction），软件照常使用。\n\n继续？",
+                picked.Count, CleanEngine.FormatSize(total), target);
+            if (!Dlg.Confirm("确认迁移", ask2)) return;
 
             CleanEngine.CancelRequested = false;
             EnterBusy(true);
@@ -1398,7 +1394,7 @@ namespace DllFix.Ui
                     EnterBusy(false);
                     UpdateStats();
                     Report(string.Format("迁移结束：成功 {0}，失败 {1}", ok, fail), 0, false);
-                    MessageBox.Show(string.Format("迁移结束。\n\n成功 {0} 个，失败 {1} 个。\n明细见日志，回滚清单在 Logs\\ 目录。", ok, fail), "完成");
+                    Dlg.Info("迁移完成", string.Format("成功 {0} 个，失败 {1} 个。\n明细见日志，回滚清单在 Logs\\ 目录。", ok, fail));
                     BeginScan();
                 }));
             });

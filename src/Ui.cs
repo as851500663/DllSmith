@@ -22,6 +22,26 @@ using DllFix.Core;
 
 namespace DllFix.Ui
 {
+    /// <summary>扫描结果复用：总览里检查过的分类，详情页直接带数据显示，不需要再扫一遍</summary>
+    public static class ScanStore
+    {
+        private static readonly Dictionary<int, List<CatalogItem>> Map = new Dictionary<int, List<CatalogItem>>();
+
+        public static void Put(int page, List<CatalogItem> items)
+        {
+            if (page < 0 || items == null) return;
+            Map[page] = new List<CatalogItem>(items);
+        }
+
+        public static List<CatalogItem> Get(int page)
+        {
+            List<CatalogItem> v;
+            return Map.TryGetValue(page, out v) ? v : null;
+        }
+
+        public static void Drop(int page) { Map.Remove(page); }
+    }
+
     /// <summary>页面进度上报接口（ScanPage / CleanPage 共用底部状态栏）</summary>
     public interface IProgressHost
     {
@@ -142,9 +162,8 @@ namespace DllFix.Ui
             string notes = string.IsNullOrEmpty(info.Notes) ? "（无更新说明）" : info.Notes;
 
             // 强制更新：没有"跳过"，只能更新或退出
-            MessageBox.Show("检测到新版本 " + info.Version + "，当前版本 v" + AppInfo.Version
-                + " 已停止支持。\n\n" + notes + "\n\n点击「确定」开始更新，更新过程中请勿关闭程序。",
-                "需要更新", MessageBoxButton.OK, MessageBoxImage.Warning);
+            Dlg.Confirm("需要更新", "检测到新版本 " + info.Version + "，当前版本 v" + AppInfo.Version
+                + " 已停止支持。\n\n" + notes + "\n\n点击「确定」开始更新，更新过程中请勿关闭程序。");
 
             // 确定后弹出下载进度窗（百分比 + 进度条），下载完自动启动安装包
             UpdateDialog dlg = new UpdateDialog(info);
@@ -163,8 +182,7 @@ namespace DllFix.Ui
                     if (!ok)
                     {
                         dlg.Close();
-                        MessageBox.Show("更新包下载或 SHA256 校验失败，请联系管理员（详情见 Logs）。", "更新失败",
-                            MessageBoxButton.OK, MessageBoxImage.Error);
+                        Dlg.Error("更新失败", "更新包下载或 SHA256 校验失败，请联系管理员（详情见 Logs）。");
                         Application.Current.Shutdown();
                         return;
                     }
@@ -181,8 +199,7 @@ namespace DllFix.Ui
         {
             if (!UpdateService.DownloadAndRun(info))
             {
-                MessageBox.Show("更新包下载或 SHA256 校验失败，详情见 Logs。", "更新失败",
-                    MessageBoxButton.OK, MessageBoxImage.Error);
+                Dlg.Error("更新失败", "更新包下载或 SHA256 校验失败，详情见 Logs。");
                 return;
             }
             Application.Current.Shutdown();
@@ -434,7 +451,7 @@ namespace DllFix.Ui
                             l.AddRange(Catalog.LoadRuntime("运行库", "VC_DLL_Scan", Environment.Is64BitOperatingSystem));
                             l.AddRange(Catalog.LoadRuntime("运行库", "NETWORK", Environment.Is64BitOperatingSystem));
                             return l;
-                        }, false);
+                        }, false, 1);
                     break;
                 case 2:
                     page = new ScanPage("DirectX 修复", glyphs[2],
@@ -444,17 +461,17 @@ namespace DllFix.Ui
                             List<CatalogItem> l = Catalog.LoadRuntime("DirectX", "DirectX", Environment.Is64BitOperatingSystem);
                             l.AddRange(Catalog.LoadRuntime("DownLevel", "downlevel", Environment.Is64BitOperatingSystem));
                             return l;
-                        }, false);
+                        }, false, 2);
                     break;
                 case 3:
                     page = new ScanPage("系统 DLL 修复", glyphs[3],
                         "解决运行游戏或打开应用时提示 DLL 文件缺失或损坏的问题。",
-                        delegate { return Catalog.LoadSystemDll(Environment.Is64BitOperatingSystem); }, false);
+                        delegate { return Catalog.LoadSystemDll(Environment.Is64BitOperatingSystem); }, false, 3);
                     break;
                 case 4:
                     page = new ScanPage("系统文件下载", glyphs[4],
                         "从镜像源下载系统文件与运行库安装包（仅下载，不安装）。",
-                        delegate { return Catalog.LoadSystemDll(Environment.Is64BitOperatingSystem); }, true);
+                        delegate { return Catalog.LoadSystemDll(Environment.Is64BitOperatingSystem); }, true, 4);
                     break;
                 case 5:
                     page = new CleanPage();
@@ -718,18 +735,36 @@ namespace DllFix.Ui
 
         private CancellationTokenSource _cts;
         private bool _busy;
+        private readonly int _page = -1;
 
         public event Action<string, int, bool> StatusChanged;
 
         public ScanPage(string title, string glyph, string desc, Func<List<CatalogItem>> loader, bool downloadOnly)
+            : this(title, glyph, desc, loader, downloadOnly, -1) { }
+
+        public ScanPage(string title, string glyph, string desc, Func<List<CatalogItem>> loader, bool downloadOnly, int pageIndex)
         {
             _title = title;
             _loader = loader;
             _downloadOnly = downloadOnly;
+            _page = pageIndex;
 
             Build(title, glyph, desc);
             Log.LineWritten += OnLogLine;
             // 不再自动扫描：由用户点「开始检查」触发
+
+            // 总览里已经检查过 → 直接复用结果，不用再扫一遍
+            List<CatalogItem> cached = ScanStore.Get(_page);
+            if (cached != null && cached.Count > 0)
+            {
+                foreach (CatalogItem it in cached) _items.Add(it);
+                ApplySort();
+                UpdateCards();
+                SetButtonText(_btnScan, "重新检查");
+                if (_placeholder != null) _placeholder.Visibility = Visibility.Collapsed;
+                Report(string.Format("已载入总览的检查结果：{0} 项", cached.Count), 0, false);
+            }
+
             Unloaded += delegate { Log.LineWritten -= OnLogLine; };
         }
 
@@ -1354,6 +1389,10 @@ namespace DllFix.Ui
                         EnterBusy(false);
                         ApplySort();
                         UpdateCards();
+                        ScanStore.Put(_page, new List<CatalogItem>(_items));
+                        SetButtonText(_btnScan, "重新检查");
+                        if (_placeholder != null)
+                            _placeholder.Visibility = _items.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
                         Report(string.Format("扫描完成：共 {0} 项，缺失/待修复 {1} 项", totalItems, absentFinal), 100, false);
                     }));
                 }
@@ -1393,7 +1432,7 @@ namespace DllFix.Ui
 
             if (_busy)
             {
-                MessageBox.Show("正在检测或处理中，请稍候…", "提示");
+                Dlg.Info("提示", "正在检测或处理中，请稍候…");
                 return;
             }
 
@@ -1405,23 +1444,19 @@ namespace DllFix.Ui
 
             if (picked.Count == 0)
             {
-                MessageBox.Show("没有需要修复的项：当前扫描结果里没有标记为「缺失」的组件。", "提示");
+                Dlg.Info("提示", "没有需要修复的项：当前扫描结果里没有标记为「缺失」的组件。");
                 return;
             }
 
             int normalCount = _items.Count(delegate(CatalogItem i) { return i.State == ItemState.Present; });
-            MessageBoxResult confirm = MessageBox.Show(
-                string.Format("将修复 {0} 项缺失组件，自动跳过 {1} 项正常组件。\n\n继续？", picked.Count, normalCount),
-                "确认修复", MessageBoxButton.YesNo, MessageBoxImage.Question);
-            if (confirm != MessageBoxResult.Yes) return;
+            if (!Dlg.Confirm("确认修复", string.Format("将修复 {0} 项缺失组件，自动跳过 {1} 项正常组件。\n\n继续？",
+                    picked.Count, normalCount))) return;
 
             if (!RepairEngineHolder.DryRun && !SystemProbe.IsElevated && picked.Any(delegate(CatalogItem i)
                 { return i.Kind == ItemKind.SystemDll; }))
             {
-                MessageBoxResult r = MessageBox.Show(
-                    "覆盖系统目录文件需要管理员权限。\n\n是 = 以管理员身份重新启动\n否 = 只处理不需要提权的项",
-                    "需要管理员权限", MessageBoxButton.YesNo, MessageBoxImage.Warning);
-                if (r == MessageBoxResult.Yes)
+                if (Dlg.Confirm("需要管理员权限",
+                    "覆盖系统目录文件需要管理员权限。\n\n确定 = 以管理员身份重新启动\n取消 = 只处理不需要提权的项"))
                 {
                     RelaunchElevated();
                     return;
@@ -1497,7 +1532,7 @@ namespace DllFix.Ui
             catch (Exception ex)
             {
                 Log.Error("elevate failed", ex);
-                MessageBox.Show("提权失败：" + ex.Message);
+                Dlg.Error("提权失败", ex.Message);
             }
         }
 
