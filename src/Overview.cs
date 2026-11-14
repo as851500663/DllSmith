@@ -499,7 +499,7 @@ namespace DllFix.Ui
             {
                 if (s.Loader == null)
                 {
-                    List<CleanItem> caches = CleanEngine.ScanCaches(null);
+                    List<CleanItem> caches = CleanEngine.ScanCaches(null, null);
                     long bytes = 0;
                     foreach (CleanItem it in caches) bytes += it.Bytes;
                     s.CleanBytes = bytes;

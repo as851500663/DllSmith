@@ -104,61 +104,71 @@ namespace DllFix.Ui
             return bytes + " B";
         }
 
-        /// <summary>可清理的缓存目录（白名单）</summary>
-        public static List<CleanItem> ScanCaches(Action<string> log)
+        /// <summary>可清理的缓存目录（白名单）；progress 回报 0-100 的确定进度</summary>
+        public static List<CleanItem> ScanCaches(Action<string> log, Action<int, string> progress)
         {
             string local = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
             string win = Environment.GetFolderPath(Environment.SpecialFolder.Windows);
             string roam = Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData);
 
+            List<string[]> defs = new List<string[]>();
+            defs.Add(new string[] { "用户临时文件", "%TEMP%", "1", Path.GetTempPath() });
+            defs.Add(new string[] { "系统临时文件", "%WINDIR%\\Temp", "1", Path.Combine(win, "Temp") });
+            defs.Add(new string[] { "Windows 更新缓存", "SoftwareDistribution\\Download", "1",
+                Path.Combine(win, "SoftwareDistribution", "Download") });
+            defs.Add(new string[] { "传递优化缓存", "DeliveryOptimization", "1",
+                Path.Combine(win, "SoftwareDistribution", "DeliveryOptimization") });
+            defs.Add(new string[] { "预读取文件", "Prefetch", "1", Path.Combine(win, "Prefetch") });
+            defs.Add(new string[] { "Windows 日志", "Logs / Panther", "0", Path.Combine(win, "Logs"),
+                Path.Combine(win, "Panther") });
+            defs.Add(new string[] { "崩溃转储", "CrashDumps", "0", Path.Combine(local, "CrashDumps") });
+            defs.Add(new string[] { "系统内存转储", "MEMORY.DMP", "0", Path.Combine(win, "MEMORY.DMP") });
+            defs.Add(new string[] { "缩略图 / 图标缓存", "Explorer\\thumbcache", "1",
+                Path.Combine(local, "Microsoft", "Windows", "Explorer") });
+            defs.Add(new string[] { "Edge 缓存", "Edge\\User Data\\*\\Cache", "0",
+                Path.Combine(local, "Microsoft", "Edge", "User Data") });
+            defs.Add(new string[] { "Chrome 缓存", "Chrome\\User Data\\*\\Cache", "0",
+                Path.Combine(local, "Google", "Chrome", "User Data") });
+            defs.Add(new string[] { "微信 / QQ 缓存", "Tencent 缓存", "0", Path.Combine(roam, "Tencent"),
+                Path.Combine(local, "Tencent") });
+
             List<CleanItem> list = new List<CleanItem>();
+            int total = defs.Count + 1;      // +1 给回收站阶段
+            int step = 0;
 
-            Add(list, log, "用户临时文件", "%TEMP%", new string[] { Path.GetTempPath() }, true);
-            Add(list, log, "系统临时文件", "%WINDIR%\\Temp", new string[] { Path.Combine(win, "Temp") }, true);
-            Add(list, log, "Windows 更新缓存", "SoftwareDistribution\\Download",
-                new string[] { Path.Combine(win, "SoftwareDistribution", "Download") }, true);
-            Add(list, log, "传递优化缓存", "DeliveryOptimization",
-                new string[] { Path.Combine(win, "SoftwareDistribution", "DeliveryOptimization") }, true);
-            Add(list, log, "预读取文件", "Prefetch",
-                new string[] { Path.Combine(win, "Prefetch") }, true);
-            Add(list, log, "Windows 日志", "Logs / Panther",
-                new string[] { Path.Combine(win, "Logs"), Path.Combine(win, "Panther") }, false);
-            Add(list, log, "崩溃转储", "CrashDumps",
-                new string[] { Path.Combine(local, "CrashDumps") }, false);
-            Add(list, log, "系统内存转储", "MEMORY.DMP",
-                new string[] { Path.Combine(win, "MEMORY.DMP") }, false);
-            Add(list, log, "缩略图 / 图标缓存", "Explorer\\thumbcache",
-                new string[] { Path.Combine(local, "Microsoft", "Windows", "Explorer") }, true);
-            Add(list, log, "Edge 缓存", "Edge\\User Data\\*\\Cache",
-                new string[] { Path.Combine(local, "Microsoft", "Edge", "User Data") }, false);
-            Add(list, log, "Chrome 缓存", "Chrome\\User Data\\*\\Cache",
-                new string[] { Path.Combine(local, "Google", "Chrome", "User Data") }, false);
-            Add(list, log, "微信 / QQ 缓存", "Tencent 缓存",
-                new string[] { Path.Combine(roam, "Tencent"), Path.Combine(local, "Tencent") }, false);
-
-            // 回收站：按磁盘分别统计（SHQueryRecycleBin(null) 是全部磁盘合计，容易误判）
-            foreach (DriveInfo d in DriveInfo.GetDrives())
+            foreach (string[] d in defs)
             {
-                if (!d.IsReady) continue;
-                if (d.DriveType != DriveType.Fixed) continue;
+                string[] roots = new string[d.Length - 3];
+                for (int i = 3; i < d.Length; i++) roots[i - 3] = d[i];
+                Add(list, log, d[0], d[1], roots, d[2] == "1");
+                step++;
+                if (progress != null) progress((int)(step * 100.0 / total), "正在统计：" + d[0]);
+            }
+
+            // 回收站：按磁盘分别统计
+            if (progress != null) progress((int)(step * 100.0 / total), "正在统计回收站…");
+            foreach (DriveInfo drv in DriveInfo.GetDrives())
+            {
+                if (!drv.IsReady) continue;
+                if (drv.DriveType != DriveType.Fixed) continue;
                 long rb;
-                try { rb = RecycleBinSize(d.Name); } catch { continue; }
+                try { rb = RecycleBinSize(drv.Name); } catch { continue; }
                 if (rb <= 0) continue;
 
                 CleanItem it = new CleanItem();
-                it.Name = "回收站 (" + d.Name.TrimEnd('\\') + ")";
+                it.Name = "回收站 (" + drv.Name.TrimEnd('\\') + ")";
                 it.Detail = "清空后不可恢复";
-                it.Path = "recycle:" + d.Name;
-                it.Drive = d.Name;
+                it.Path = "recycle:" + drv.Name;
+                it.Drive = drv.Name;
                 it.Bytes = rb;
                 it.Kind = CleanKind.Cache;
-                it.Selected = false;   // 默认不勾选，避免误清空
+                it.Selected = false;
                 list.Add(it);
                 if (log != null) log(it.Name + " " + FormatSize(rb));
             }
 
-            // 按大小排序，大的在前
             list.Sort(delegate(CleanItem a, CleanItem b) { return b.Bytes.CompareTo(a.Bytes); });
+            if (progress != null) progress(100, "统计完成");
             return list;
         }
 
@@ -415,12 +425,13 @@ namespace DllFix.Ui
         }
 
         // ── AppData 大文件夹 ────────────────────────────────────────────────
-        public static List<CleanItem> ScanBigFolders(Action<string> log, long minBytes)
+        public static List<CleanItem> ScanBigFolders(Action<string> log, long minBytes, Action<int, string> progress)
         {
             List<CleanItem> list = new List<CleanItem>();
             string local = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
             string roam = Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData);
 
+            List<string> candidates = new List<string>();
             foreach (string root in new string[] { local, roam })
             {
                 foreach (string dir in SafeDirs(root))
@@ -429,23 +440,35 @@ namespace DllFix.Ui
                     if (name.Equals("Temp", StringComparison.OrdinalIgnoreCase)) continue;
                     if (name.Equals("Packages", StringComparison.OrdinalIgnoreCase)) continue;
                     if (IsJunction(dir)) continue;
-                    long bytes = 0; int files = 0;
-                    MeasureDir(dir, ref bytes, ref files, 0);
-                    if (bytes < minBytes) continue;
-
-                    CleanItem it = new CleanItem();
-                    it.Name = name;
-                    it.Detail = Path.GetFileName(root) + "\\" + name;
-                    it.Path = dir;
-                    it.Bytes = bytes;
-                    it.Files = files;
-                    it.Kind = CleanKind.BigFolder;
-                    it.Selected = false;
-                    list.Add(it);
-                    if (log != null) log("大文件夹 " + name + "  " + FormatSize(bytes));
+                    candidates.Add(dir);
                 }
             }
+
+            int idx = 0;
+            foreach (string dir in candidates)
+            {
+                idx++;
+                if (progress != null)
+                    progress((int)(idx * 100.0 / Math.Max(1, candidates.Count)), "正在统计：" + Path.GetFileName(dir));
+
+                long bytes = 0; int files = 0;
+                MeasureDir(dir, ref bytes, ref files, 0);
+                if (bytes < minBytes) continue;
+
+                CleanItem it = new CleanItem();
+                it.Name = Path.GetFileName(dir);
+                it.Detail = Path.GetFileName(Path.GetDirectoryName(dir)) + "\\" + Path.GetFileName(dir);
+                it.Path = dir;
+                it.Bytes = bytes;
+                it.Files = files;
+                it.Kind = CleanKind.BigFolder;
+                it.Selected = false;
+                list.Add(it);
+                if (log != null) log("大文件夹 " + it.Name + "  " + FormatSize(bytes));
+            }
+
             list.Sort(delegate(CleanItem a, CleanItem b) { return b.Bytes.CompareTo(a.Bytes); });
+            if (progress != null) progress(100, "统计完成");
             return list;
         }
 
@@ -772,9 +795,9 @@ namespace DllFix.Ui
             if (busy || percent > 0)
             {
                 _barHost.Visibility = Visibility.Visible;
-                _bar.IsIndeterminate = busy && percent <= 0;
-                if (percent > 0) _bar.Value = percent;
-                _barPct.Text = percent > 0 ? percent + "%" : "…";
+                _bar.IsIndeterminate = false;          // 只用确定进度：0 → 100
+                _bar.Value = percent;
+                _barPct.Text = percent + "%";
                 if (text != null) _barText.Text = text;
             }
             else
@@ -1189,7 +1212,22 @@ namespace DllFix.Ui
             StylePill(_btnFolder, "大文件夹迁移", mode == 1);
             _targetBox.Visibility = mode == 1 ? Visibility.Visible : Visibility.Collapsed;
             _btnAction.Content = mode == 0 ? "立即清理" : "迁移选中";
-            BeginScan();
+
+            // 切模式不自动扫描：清空结果，等用户点「检查可用空间」
+            _items.Clear();
+            _barHost.Visibility = Visibility.Collapsed;
+            _bar.Value = 0;
+            _barPct.Text = "0%";
+            if (_placeholder != null)
+            {
+                _placeholder.Text = mode == 0
+                    ? "尚未检查：点击右上角「检查可用空间」统计可清理项。"
+                    : "尚未检查：点击右上角「检查可用空间」扫描 AppData 大文件夹。";
+                _placeholder.Visibility = Visibility.Visible;
+            }
+            UpdateStats();
+            Report("就绪：点击「检查可用空间」开始统计", 0, false);
+            if (_barHost != null) _barHost.Visibility = Visibility.Collapsed;
         }
 
         // ── 扫描 ────────────────────────────────────────────────────────────
@@ -1203,9 +1241,17 @@ namespace DllFix.Ui
 
             Thread t = new Thread(delegate()
             {
+                Action<string> onLog = delegate(string s)
+                {
+                    Dispatcher.BeginInvoke(new Action(delegate { LogLine(s); }));
+                };
+                Action<int, string> onProgress = delegate(int pct, string msg)
+                {
+                    Report(msg, pct, true);
+                };
                 List<CleanItem> found = mode == 0
-                    ? CleanEngine.ScanCaches(delegate(string s) { Dispatcher.BeginInvoke(new Action(delegate { LogLine(s); })); })
-                    : CleanEngine.ScanBigFolders(delegate(string s) { Dispatcher.BeginInvoke(new Action(delegate { LogLine(s); })); }, 100L * 1048576L);
+                    ? CleanEngine.ScanCaches(onLog, onProgress)
+                    : CleanEngine.ScanBigFolders(onLog, 100L * 1048576L, onProgress);
 
                 Dispatcher.BeginInvoke(new Action(delegate
                 {
@@ -1230,6 +1276,7 @@ namespace DllFix.Ui
                 if (it.Selected) sel += it.Bytes;
             }
             _statFree.Text = CleanEngine.FormatSize(CleanEngine.DiskFree());
+            if (!_items.Any()) { _statUsed.Text = "0 B"; _statSel.Text = "0 B"; }
             _statUsed.Text = CleanEngine.FormatSize(total);
             _statSel.Text = CleanEngine.FormatSize(sel);
         }
