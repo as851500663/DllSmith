@@ -1099,6 +1099,7 @@ namespace DllFix.Ui
                 "        <ColumnDefinition Width='100'/>" +
                 "        <ColumnDefinition Width='150'/>" +
                 "        <ColumnDefinition Width='120'/>" +
+                "        <ColumnDefinition Width='104'/>" +
                 "      </Grid.ColumnDefinitions>" +
                 "      <CheckBox IsChecked='{Binding Selected, Mode=TwoWay}' HorizontalAlignment='Center' VerticalAlignment='Center'/>" +
                 "      <StackPanel Grid.Column='1' Orientation='Horizontal' Margin='8,0,12,0'>" +
@@ -1111,6 +1112,14 @@ namespace DllFix.Ui
                 "      </Border>" +
                 "      <TextBlock Grid.Column='3' Text='{Binding Version}' FontFamily='Consolas' FontSize='12.5'" +
                 "                 Foreground='#5A6B80' VerticalAlignment='Center' Margin='8,0,0,0'/>" +
+                "      <StackPanel Grid.Column='5' Orientation='Horizontal' VerticalAlignment='Center'" +
+                "                  Visibility='{Binding HasPercent}'>" +
+                "        <ProgressBar Width='54' Height='5' Minimum='0' Maximum='100' Value='{Binding Percent}'" +
+                "                     Foreground='#2A6CD8' Background='#E6ECF6' BorderThickness='0'" +
+                "                     VerticalAlignment='Center'/>" +
+                "        <TextBlock Text='{Binding PercentText}' FontSize='11' Foreground='#5A6B80'" +
+                "                   Margin='7,0,0,0' VerticalAlignment='Center'/>" +
+                "      </StackPanel>" +
                 "      <Border Grid.Column='4' HorizontalAlignment='Left' VerticalAlignment='Center' CornerRadius='10' Padding='11,3'" +
                 "              Background='#E9F8F0' BorderBrush='#CFEBD9' BorderThickness='1'>" +
                 "        <Border.Style>" +
@@ -1424,6 +1433,7 @@ namespace DllFix.Ui
             {
                 Dispatcher.BeginInvoke(new Action(delegate
                 {
+                    item.Percent = pct;
                     Report(string.Format("{0}：{1}", item.Title, msg), pct, false);
                 }));
             };

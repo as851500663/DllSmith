@@ -29,8 +29,36 @@ namespace DllFix.Ui
     // ── 数据模型 ────────────────────────────────────────────────────────────
     public enum CleanKind { Cache, BigFolder }
 
-    public class CleanItem
+    public class CleanItem : System.ComponentModel.INotifyPropertyChanged
     {
+        public event System.ComponentModel.PropertyChangedEventHandler PropertyChanged;
+
+        private int _percent;
+        private string _status = "";
+
+        private void Raise(string name)
+        {
+            System.ComponentModel.PropertyChangedEventHandler h = PropertyChanged;
+            if (h != null) h(this, new System.ComponentModel.PropertyChangedEventArgs(name));
+        }
+
+        /// <summary>单项进度 0-100（0 = 未开始）</summary>
+        public int Percent
+        {
+            get { return _percent; }
+            set { _percent = value; Raise("Percent"); Raise("PercentText"); Raise("HasPercent"); }
+        }
+
+        public string PercentText
+        {
+            get { return _percent <= 0 ? "" : (_percent >= 100 ? "完成" : _percent + "%"); }
+        }
+
+        public Visibility HasPercent
+        {
+            get { return _percent > 0 ? Visibility.Visible : Visibility.Collapsed; }
+        }
+
         public string Name { get; set; }
         public string Detail { get; set; }
         public string Path { get; set; }
@@ -38,7 +66,11 @@ namespace DllFix.Ui
         public int Files { get; set; }
         public bool Selected { get; set; }
         public CleanKind Kind { get; set; }
-        public string Status { get; set; }
+        public string Status
+        {
+            get { return _status; }
+            set { _status = value; Raise("Status"); }
+        }
 
         public string SizeText
         {
@@ -189,18 +221,32 @@ namespace DllFix.Ui
                     long after = RecycleBinSize();
                     long d = Math.Max(0, before - after);
                     freed += d;
+                    it.Percent = 100;
                     it.Status = "已清空 " + FormatSize(d);
                     if (log != null) log("回收站：释放 " + FormatSize(d));
                     continue;
                 }
 
+                it.Percent = 5;
                 long got = 0;
+                int totalFiles = Math.Max(1, it.Files);
+                int doneFiles = 0;
                 foreach (string root in (it.Path ?? "").Split(new string[] { " ; " }, StringSplitOptions.RemoveEmptyEntries))
                 {
-                    try { got += PurgePath(root, log); }
+                    try
+                    {
+                        got += PurgePath(root, log, delegate(int n)
+                        {
+                            doneFiles += n;
+                            int pct = 5 + (int)(90L * doneFiles / totalFiles);
+                            if (pct > 95) pct = 95;
+                            it.Percent = pct;
+                        });
+                    }
                     catch (Exception ex) { if (log != null) log("清理异常（已跳过）：" + it.Name + " - " + ex.Message); }
                 }
                 freed += got;
+                it.Percent = 100;
                 it.Status = "已释放 " + FormatSize(got);
                 if (log != null) log(string.Format("{0}：释放 {1}", it.Name, FormatSize(got)));
                 if (progress != null) progress((int)(idx * 100L / Math.Max(1, list.Count)), "已清理 " + it.Name);
@@ -208,7 +254,7 @@ namespace DllFix.Ui
             return freed;
         }
 
-        private static long PurgePath(string path, Action<string> log)
+        private static long PurgePath(string path, Action<string> log, Action<int> onFiles)
         {
             long freed = 0;
             try
@@ -237,7 +283,7 @@ namespace DllFix.Ui
                         foreach (string sub in new string[] { "Cache", "Code Cache", "GPUCache", "Service Worker", "CacheStorage" })
                         {
                             string p = Path.Combine(profile, sub);
-                            if (Directory.Exists(p)) freed += DeleteTree(p, log);
+                            if (Directory.Exists(p)) freed += DeleteTree(p, log, onFiles);
                         }
                     }
                     return freed;
@@ -247,12 +293,12 @@ namespace DllFix.Ui
                     foreach (string sub in new string[] { "temp", "Temp", "Crash", "crash", "log", "Log" })
                     {
                         string p = Path.Combine(path, sub);
-                        if (Directory.Exists(p)) freed += DeleteTree(p, log);
+                        if (Directory.Exists(p)) freed += DeleteTree(p, log, onFiles);
                     }
                     return freed;
                 }
 
-                freed += DeleteTreeContent(path, log);
+                freed += DeleteTreeContent(path, log, onFiles);
             }
             catch (Exception ex) { if (log != null) log("清理失败：" + ex.Message); }
             return freed;
@@ -264,9 +310,9 @@ namespace DllFix.Ui
             catch { return new string[0]; }
         }
 
-        private static long DeleteTree(string dir, Action<string> log)
+        private static long DeleteTree(string dir, Action<string> log, Action<int> onFiles)
         {
-            long freed = DeleteTreeContent(dir, log);
+            long freed = DeleteTreeContent(dir, log, onFiles);
             try { Directory.Delete(dir, true); } catch { }
             return freed;
         }
@@ -288,7 +334,7 @@ namespace DllFix.Ui
         }
 
         /// <summary>删除目录内容（保留目录本身）：迭代遍历、跳过联接、单文件失败只记录不中断</summary>
-        private static long DeleteTreeContent(string dir, Action<string> log)
+        private static long DeleteTreeContent(string dir, Action<string> log, Action<int> onFiles)
         {
             if (!IsAllowed(dir))
             {
@@ -317,6 +363,7 @@ namespace DllFix.Ui
                         File.SetAttributes(f, FileAttributes.Normal);
                         File.Delete(f);
                         freed += len;
+                        if (onFiles != null) onFiles(1);
                     }
                     catch { }               // 占用 / 权限不足：跳过
                 }
@@ -618,8 +665,29 @@ namespace DllFix.Ui
 
         private void Report(string text, int percent, bool busy)
         {
+            if (!Dispatcher.CheckAccess())
+            {
+                Dispatcher.BeginInvoke(new Action(delegate { Report(text, percent, busy); }));
+                return;
+            }
             Action<string, int, bool> h = StatusChanged;
             if (h != null) h(text, percent, busy);
+
+            // 页内进度条：忙碌时显示，跑完 100% 后稍后隐藏
+            if (busy || percent > 0)
+            {
+                _barHost.Visibility = Visibility.Visible;
+                _bar.IsIndeterminate = busy && percent <= 0;
+                if (percent > 0) _bar.Value = percent;
+                _barPct.Text = percent > 0 ? percent + "%" : "…";
+                if (text != null) _barText.Text = text;
+            }
+            else
+            {
+                _bar.Value = 100;
+                _barPct.Text = "100%";
+                _barText.Text = text == null ? "完成" : text;
+            }
         }
 
         private void LogLine(string line)
@@ -686,8 +754,9 @@ namespace DllFix.Ui
             card.Padding = new Thickness(16, 14, 16, 8);
 
             Grid g = new Grid();
-            g.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
-            g.RowDefinitions.Add(new RowDefinition());
+            g.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });   // 工具条
+            g.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });   // 进度条
+            g.RowDefinitions.Add(new RowDefinition());                              // 列表
 
             Grid bar = new Grid();
             bar.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
@@ -733,6 +802,50 @@ namespace DllFix.Ui
             bar.Children.Add(acts);
             g.Children.Add(bar);
 
+            // 页内进度条（检查 / 清理 / 迁移共用）
+            _barHost.Background = new SolidColorBrush(Color.FromRgb(0xF7, 0xFA, 0xFF));
+            _barHost.BorderBrush = new SolidColorBrush(Color.FromRgb(0xE7, 0xEF, 0xFB));
+            _barHost.BorderThickness = new Thickness(1);
+            _barHost.CornerRadius = new CornerRadius(12);
+            _barHost.Padding = new Thickness(14, 8, 14, 8);
+            _barHost.Margin = new Thickness(0, 10, 0, 0);
+            _barHost.Visibility = Visibility.Collapsed;
+
+            Grid pg = new Grid();
+            pg.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+            pg.ColumnDefinitions.Add(new ColumnDefinition());
+            pg.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+
+            _barText.Text = "准备中…";
+            _barText.FontSize = 12;
+            _barText.Foreground = Theme.TextBody;
+            _barText.VerticalAlignment = VerticalAlignment.Center;
+            _barText.Margin = new Thickness(0, 0, 12, 0);
+            pg.Children.Add(_barText);
+
+            _bar.Height = 8;
+            _bar.Minimum = 0;
+            _bar.Maximum = 100;
+            _bar.Value = 0;
+            _bar.Foreground = Theme.PrimarySoft;
+            _bar.Background = new SolidColorBrush(Color.FromRgb(0xE6, 0xEC, 0xF6));
+            _bar.BorderThickness = new Thickness(0);
+            _bar.VerticalAlignment = VerticalAlignment.Center;
+            Grid.SetColumn(_bar, 1);
+            pg.Children.Add(_bar);
+
+            _barPct.Text = "0%";
+            _barPct.FontSize = 12;
+            _barPct.Foreground = Theme.Primary;
+            _barPct.VerticalAlignment = VerticalAlignment.Center;
+            _barPct.Margin = new Thickness(12, 0, 0, 0);
+            Grid.SetColumn(_barPct, 2);
+            pg.Children.Add(_barPct);
+
+            _barHost.Child = pg;
+            Grid.SetRow(_barHost, 1);
+            g.Children.Add(_barHost);
+
             _list.ItemsSource = _items;
             _list.BorderThickness = new Thickness(0);
             _list.Background = Brushes.White;
@@ -741,7 +854,7 @@ namespace DllFix.Ui
             _list.ItemTemplate = BuildRow();
             _list.ItemContainerStyle = BuildRowStyle();
             _list.Resources.Add(typeof(ScrollBar), BuildScrollBar());
-            Grid.SetRow(_list, 1);
+            Grid.SetRow(_list, 2);
             g.Children.Add(_list);
 
             _placeholder = new TextBlock();
@@ -752,7 +865,7 @@ namespace DllFix.Ui
             _placeholder.Foreground = Theme.TextMuted;
             _placeholder.HorizontalAlignment = HorizontalAlignment.Center;
             _placeholder.VerticalAlignment = VerticalAlignment.Center;
-            Grid.SetRow(_placeholder, 1);
+            Grid.SetRow(_placeholder, 2);
             g.Children.Add(_placeholder);
 
             card.Child = g;
@@ -843,6 +956,10 @@ namespace DllFix.Ui
         }
 
         private StackPanel _targetBox;
+        private readonly Border _barHost = new Border();
+        private readonly ProgressBar _bar = new ProgressBar();
+        private readonly TextBlock _barText = new TextBlock();
+        private readonly TextBlock _barPct = new TextBlock();
         private TextBlock _placeholder;
 
         private Border StatCard(string title, TextBlock value, Color accent)
@@ -910,7 +1027,7 @@ namespace DllFix.Ui
   <Grid Height='48' Background='Transparent'>
     <Grid.ColumnDefinitions>
       <ColumnDefinition Width='48'/><ColumnDefinition Width='*'/><ColumnDefinition Width='120'/>
-      <ColumnDefinition Width='110'/><ColumnDefinition Width='120'/>
+      <ColumnDefinition Width='110'/><ColumnDefinition Width='120'/><ColumnDefinition Width='104'/>
     </Grid.ColumnDefinitions>
     <CheckBox IsChecked='{Binding Selected, Mode=TwoWay}' HorizontalAlignment='Center'
               VerticalAlignment='Center'/>
@@ -924,6 +1041,12 @@ namespace DllFix.Ui
                Foreground='#8B9BB0' VerticalAlignment='Center' TextTrimming='CharacterEllipsis'/>
     <TextBlock Grid.Column='4' Text='{Binding Status}' FontSize='11.5'
                Foreground='#1E9A5A' VerticalAlignment='Center'/>
+    <StackPanel Grid.Column='5' Orientation='Horizontal' VerticalAlignment='Center'
+                Visibility='{Binding HasPercent}'>
+      <ProgressBar Width='54' Height='5' Minimum='0' Maximum='100' Value='{Binding Percent}'
+                   Foreground='#2A6CD8' Background='#E6ECF6' BorderThickness='0'/>
+      <TextBlock Text='{Binding PercentText}' FontSize='11' Foreground='#5A6B80' Margin='7,0,0,0'/>
+    </StackPanel>
   </Grid>
 </DataTemplate>";
             return (DataTemplate)XamlReader.Parse(xaml);
@@ -1068,8 +1191,8 @@ namespace DllFix.Ui
                         {
                             Report("清理完成，释放 " + CleanEngine.FormatSize(freedFinal), 0, false);
                             MessageBox.Show("清理完成，释放 " + CleanEngine.FormatSize(freedFinal) + "。\n\n详情见日志面板。", "完成");
+                            // 保留列表：每行保留「完成」与已释放大小，便于核对
                         }
-                        BeginScan();
                     }));
                 });
                 t.IsBackground = true;

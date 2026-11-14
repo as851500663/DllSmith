@@ -10,6 +10,7 @@ using System;
 using System.Collections.Generic;
 using System.Collections.ObjectModel;
 using System.ComponentModel;
+using System.Windows;
 using System.Diagnostics;
 using System.Globalization;
 using System.IO;
@@ -147,7 +148,7 @@ namespace DllFix.Core
         public const string ProductName = "DllSmith";
         public const string ChineseName = "DLL 修复匠";
         public const string Tagline = "开源运行库与 DLL 修复工具";
-        public const string Version = "1.2.1";
+        public const string Version = "1.2.2";
         public const string License = "GPL-3.0";
         public const string SiteUrl  = "http://123.57.94.141:8787/download";
         public const string BuildTag = "opensource";
@@ -323,7 +324,18 @@ namespace DllFix.Core
         public int Percent
         {
             get { return _percent; }
-            set { _percent = value; Raise("Percent"); }
+            set { _percent = value; Raise("Percent"); Raise("PercentText"); Raise("HasPercent"); }
+        }
+
+        /// <summary>行内进度文案：0 表示未开始</summary>
+        public string PercentText
+        {
+            get { return _percent <= 0 ? "" : (_percent >= 100 ? "完成" : _percent + "%"); }
+        }
+
+        public Visibility HasPercent
+        {
+            get { return _percent > 0 ? Visibility.Visible : Visibility.Collapsed; }
         }
 
         public string StateText
